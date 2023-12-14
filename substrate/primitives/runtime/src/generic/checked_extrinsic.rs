@@ -57,7 +57,6 @@ pub enum ExtrinsicFormat<AccountId, Extension> {
 /// has been checked and is good, particularly with regards to the signature.
 ///
 /// [`CheckedExtrinsic::function`], alongside all other bits and bobs.
->>>>>>> upstream/master
 #[derive(PartialEq, Eq, Clone, sp_core::RuntimeDebug)]
 pub struct CheckedExtrinsic<AccountId, Call, Extension> {
 	/// Who this purports to be from and the number of extrinsics have come before

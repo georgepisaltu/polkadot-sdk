@@ -315,10 +315,25 @@ pub type Executive = frame_executive::Executive<
 extern crate frame_benchmarking;
 
 #[cfg(feature = "runtime-benchmarks")]
+impl frame_system_benchmarking::extensions::Config for Runtime {
+	fn default_call() -> Self::RuntimeCall {
+		RuntimeCall::System(frame_system::Call::set_heap_pages { pages: 0u64 })
+	}
+
+	fn dispatch_info(
+		weight: Weight,
+		class: frame_support::pallet_prelude::DispatchClass,
+	) -> <Self::RuntimeCall as sp_runtime::traits::Dispatchable>::Info {
+		frame_support::dispatch::DispatchInfo { weight, class, ..Default::default() }
+	}
+}
+
+#[cfg(feature = "runtime-benchmarks")]
 mod benches {
 	define_benchmarks!(
 		[frame_benchmarking, BaselineBench::<Runtime>]
 		[frame_system, SystemBench::<Runtime>]
+		[frame_system_extensions, SystemExtensionsBench::<Runtime>]
 		[pallet_balances, Balances]
 		[pallet_timestamp, Timestamp]
 		[pallet_sudo, Sudo]
@@ -503,6 +518,7 @@ impl_runtime_apis! {
 			use frame_benchmarking::{baseline, Benchmarking, BenchmarkList};
 			use frame_support::traits::StorageInfoTrait;
 			use frame_system_benchmarking::Pallet as SystemBench;
+			use frame_system_benchmarking::extensions::Pallet as SystemExtensionsBench;
 			use baseline::Pallet as BaselineBench;
 
 			let mut list = Vec::<BenchmarkList>::new();
@@ -519,6 +535,7 @@ impl_runtime_apis! {
 			use frame_benchmarking::{baseline, Benchmarking, BenchmarkBatch};
 			use sp_storage::TrackedStorageKey;
 			use frame_system_benchmarking::Pallet as SystemBench;
+			use frame_system_benchmarking::extensions::Pallet as SystemExtensionsBench;
 			use baseline::Pallet as BaselineBench;
 
 			impl frame_system_benchmarking::Config for Runtime {}
