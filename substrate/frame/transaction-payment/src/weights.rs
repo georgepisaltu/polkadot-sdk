@@ -20,7 +20,7 @@
 #![allow(unused_imports)]
 #![allow(missing_docs)]
 
-use frame_support::{traits::Get, weights::{Weight, constants::RocksDbWeight}};
+use frame_support::weights::Weight;
 use core::marker::PhantomData;
 
 /// Weight functions needed for pallet_utility.
