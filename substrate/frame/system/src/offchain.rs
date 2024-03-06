@@ -60,8 +60,8 @@ use codec::Encode;
 use sp_runtime::{
 	app_crypto::RuntimeAppPublic,
 	traits::{
-		CreateInherent, CreateSignedTransaction as CreateSignedTransactionT, CreateTransactionBase,
-		ExtrinsicLike, IdentifyAccount, One,
+		CreateInherent, CreateSignedTransaction as CreateSignedTransactionT, CreateTransaction,
+		CreateTransactionBase, ExtrinsicLike, IdentifyAccount, One,
 	},
 	RuntimeDebug,
 };
@@ -248,8 +248,6 @@ impl<
 		C: AppCrypto<T::Public, T::Signature>,
 		LocalCall,
 	> SendSignedTransaction<T, C, LocalCall> for Signer<T, C, ForAny>
-where
-	<T as SendTransactionTypes<LocalCall>>::Extrinsic: CreateSignedTransactionT,
 {
 	type Result = Option<(Account<T>, Result<(), ()>)>;
 
@@ -266,8 +264,6 @@ impl<
 		C: AppCrypto<T::Public, T::Signature>,
 		LocalCall,
 	> SendSignedTransaction<T, C, LocalCall> for Signer<T, C, ForAll>
-where
-	<T as SendTransactionTypes<LocalCall>>::Extrinsic: CreateSignedTransactionT,
 {
 	type Result = Vec<(Account<T>, Result<(), ()>)>;
 
@@ -284,8 +280,6 @@ impl<
 		C: AppCrypto<T::Public, T::Signature>,
 		LocalCall,
 	> SendUnsignedTransaction<T, LocalCall> for Signer<T, C, ForAny>
-where
-	<T as SendTransactionTypes<LocalCall>>::Extrinsic: CreateInherent,
 {
 	type Result = Option<(Account<T>, Result<(), ()>)>;
 
@@ -312,8 +306,6 @@ impl<
 		C: AppCrypto<T::Public, T::Signature>,
 		LocalCall,
 	> SendUnsignedTransaction<T, LocalCall> for Signer<T, C, ForAll>
-where
-	<T as SendTransactionTypes<LocalCall>>::Extrinsic: CreateInherent,
 {
 	type Result = Vec<(Account<T>, Result<(), ()>)>;
 
@@ -460,12 +452,11 @@ pub trait SigningTypes: crate::Config {
 /// A definition of types required to submit transactions from within the runtime.
 pub trait SendTransactionTypes<LocalCall> {
 	/// The extrinsic type expected by the runtime.
-	type Extrinsic: ExtrinsicLike
-		+ codec::Encode
-		+ CreateTransactionBase<Call = Self::OverarchingCall>;
-	// + CreateTransaction
-	// + CreateSignedTransactionT
-	// + CreateInherent;
+	type Extrinsic: ExtrinsicLike /* <Call = Self::OverarchingCall> */ + codec::Encode
+		+ CreateTransactionBase<Call = Self::OverarchingCall>
+		+ CreateTransaction
+		+ CreateSignedTransactionT
+		+ CreateInherent;
 	/// The runtime's call type.
 	///
 	/// This has additional bound to be able to be created from pallet-local `Call` types.
@@ -481,8 +472,6 @@ pub trait SendTransactionTypes<LocalCall> {
 /// fees, or mortality depending on the `pallet` being called).
 pub trait CreateSignedTransaction<LocalCall>:
 	SendTransactionTypes<LocalCall> + SigningTypes
-where
-	Self::Extrinsic: CreateSignedTransactionT,
 {
 	/// Attempt to create signed extrinsic data that encodes call from given account.
 	///
@@ -526,8 +515,7 @@ pub trait SendSignedTransaction<
 	T: SigningTypes + CreateSignedTransaction<LocalCall>,
 	C: AppCrypto<T::Public, T::Signature>,
 	LocalCall,
-> where
-	<T as SendTransactionTypes<LocalCall>>::Extrinsic: CreateSignedTransactionT,
+>
 {
 	/// A submission result.
 	///
@@ -575,10 +563,7 @@ pub trait SendSignedTransaction<
 }
 
 /// Submit an unsigned transaction onchain with a signed payload
-pub trait SendUnsignedTransaction<T: SigningTypes + SendTransactionTypes<LocalCall>, LocalCall>
-where
-	<T as SendTransactionTypes<LocalCall>>::Extrinsic: CreateInherent,
-{
+pub trait SendUnsignedTransaction<T: SigningTypes + SendTransactionTypes<LocalCall>, LocalCall> {
 	/// A submission result.
 	///
 	/// Should contain the submission result and the account(s) that signed the payload.
