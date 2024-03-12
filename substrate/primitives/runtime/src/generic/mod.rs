@@ -35,3 +35,5 @@ pub use self::{
 	header::Header,
 	unchecked_extrinsic::{Preamble, SignedPayload, UncheckedExtrinsic},
 };
+#[allow(deprecated)]
+pub use unchecked_extrinsic::UncheckedSignaturePayload;

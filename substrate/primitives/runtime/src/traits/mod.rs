@@ -1387,68 +1387,6 @@ where
 	}
 }
 
-/// Common interface for the `CreateTransaction` trait family to unify the `Call` type.
-pub trait CreateTransactionBase: ExtrinsicLike {
-	/// The function call.
-	type Call: TypeInfo;
-}
-
-#[allow(deprecated)]
-impl<T> CreateTransactionBase for T
-where
-	T: Extrinsic,
-{
-	type Call = <T as Extrinsic>::Call;
-}
-
-/// Interface for creating a transaction.
-pub trait CreateTransaction: CreateTransactionBase {
-	/// The extension.
-	type Extension: TypeInfo;
-
-	/// Create a transaction using the call and the desired transaction extension.
-	fn create_transaction(call: Self::Call, extension: Self::Extension) -> Self;
-}
-
-/// Interface for creating an old-school signed transaction.
-pub trait CreateSignedTransaction: CreateTransactionBase {
-	/// The extension.
-	type SignaturePayload: SignaturePayload;
-
-	/// Create an old-school signed transaction.
-	fn create_signed_transaction(call: Self::Call, signed_data: Self::SignaturePayload) -> Self;
-}
-
-#[allow(deprecated)]
-impl<T> CreateSignedTransaction for T
-where
-	T: Extrinsic,
-{
-	type SignaturePayload = <T as Extrinsic>::SignaturePayload;
-
-	fn create_signed_transaction(call: Self::Call, signed_data: Self::SignaturePayload) -> Self {
-		#[allow(deprecated)]
-		<Self as Extrinsic>::new(call, Some(signed_data))
-			.expect("impl should provide signed tx constructor")
-	}
-}
-
-/// Interface for creating an inherent.
-pub trait CreateInherent: CreateTransactionBase {
-	/// Create an inherent.
-	fn create_inherent(call: Self::Call) -> Self;
-}
-
-#[allow(deprecated)]
-impl<T> CreateInherent for T
-where
-	T: Extrinsic,
-{
-	fn create_inherent(call: Self::Call) -> Self {
-		<Self as Extrinsic>::new_inherent(call)
-	}
-}
-
 /// Something that acts like a [`SignaturePayload`](Extrinsic::SignaturePayload) of an
 /// [`Extrinsic`].
 pub trait SignaturePayload {

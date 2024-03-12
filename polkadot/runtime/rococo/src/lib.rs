@@ -570,53 +570,66 @@ impl pallet_grandpa::Config for Runtime {
 		pallet_grandpa::EquivocationReportSystem<Self, Offences, Historical, ReportLongevity>;
 }
 
+// /// Submits a transaction with the node's public and signature type. Adheres to the signed
+// extension /// format of the chain.
+// impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for Runtime
+// where
+// 	RuntimeCall: From<LocalCall>,
+// {
+// 	fn create_transaction<C: frame_system::offchain::AppCrypto<Self::Public, Self::Signature>>(
+// 		call: RuntimeCall,
+// 		public: <Signature as Verify>::Signer,
+// 		account: AccountId,
+// 		nonce: <Runtime as frame_system::Config>::Nonce,
+// 	) -> Option<UncheckedExtrinsic> {
+// 		use sp_runtime::traits::StaticLookup;
+// 		// take the biggest period possible.
+// 		let period =
+// 			BlockHashCount::get().checked_next_power_of_two().map(|c| c / 2).unwrap_or(2) as u64;
+
+// 		let current_block = System::block_number()
+// 			.saturated_into::<u64>()
+// 			// The `System::block_number` is initialized with `n+1`,
+// 			// so the actual block number is `n`.
+// 			.saturating_sub(1);
+// 		let tip = 0;
+// 		let tx_ext: TxExtension = (
+// 			frame_system::CheckNonZeroSender::<Runtime>::new(),
+// 			frame_system::CheckSpecVersion::<Runtime>::new(),
+// 			frame_system::CheckTxVersion::<Runtime>::new(),
+// 			frame_system::CheckGenesis::<Runtime>::new(),
+// 			frame_system::CheckMortality::<Runtime>::from(generic::Era::mortal(
+// 				period,
+// 				current_block,
+// 			)),
+// 			frame_system::CheckNonce::<Runtime>::from(nonce),
+// 			frame_system::CheckWeight::<Runtime>::new(),
+// 			pallet_transaction_payment::ChargeTransactionPayment::<Runtime>::from(tip),
+// 		)
+// 			.into();
+// 		let raw_payload = SignedPayload::new(call, tx_ext)
+// 			.map_err(|e| {
+// 				log::warn!("Unable to create signed payload: {:?}", e);
+// 			})
+// 			.ok()?;
+// 		let signature = raw_payload.using_encoded(|payload| C::sign(payload, public))?;
+// 		let (call, tx_ext, _) = raw_payload.deconstruct();
+// 		let address = <Runtime as frame_system::Config>::Lookup::unlookup(account);
+// 		let transaction = UncheckedExtrinsic::new_signed(call, address, signature, tx_ext);
+// 		Some(transaction)
+// 	}
+// }
+
 /// Submits a transaction with the node's public and signature type. Adheres to the signed extension
 /// format of the chain.
-impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for Runtime
-where
-	RuntimeCall: From<LocalCall>,
-{
-	fn create_transaction<C: frame_system::offchain::AppCrypto<Self::Public, Self::Signature>>(
-		call: RuntimeCall,
-		public: <Signature as Verify>::Signer,
-		account: AccountId,
-		nonce: <Runtime as frame_system::Config>::Nonce,
-	) -> Option<UncheckedExtrinsic> {
-		use sp_runtime::traits::StaticLookup;
-		// take the biggest period possible.
-		let period =
-			BlockHashCount::get().checked_next_power_of_two().map(|c| c / 2).unwrap_or(2) as u64;
+impl frame_system::offchain::CreateSignedTransaction for Runtime {
+	type SignaturePayload = (Address, Signature, TxExtension);
 
-		let current_block = System::block_number()
-			.saturated_into::<u64>()
-			// The `System::block_number` is initialized with `n+1`,
-			// so the actual block number is `n`.
-			.saturating_sub(1);
-		let tip = 0;
-		let tx_ext: TxExtension = (
-			frame_system::CheckNonZeroSender::<Runtime>::new(),
-			frame_system::CheckSpecVersion::<Runtime>::new(),
-			frame_system::CheckTxVersion::<Runtime>::new(),
-			frame_system::CheckGenesis::<Runtime>::new(),
-			frame_system::CheckMortality::<Runtime>::from(generic::Era::mortal(
-				period,
-				current_block,
-			)),
-			frame_system::CheckNonce::<Runtime>::from(nonce),
-			frame_system::CheckWeight::<Runtime>::new(),
-			pallet_transaction_payment::ChargeTransactionPayment::<Runtime>::from(tip),
-		)
-			.into();
-		let raw_payload = SignedPayload::new(call, tx_ext)
-			.map_err(|e| {
-				log::warn!("Unable to create signed payload: {:?}", e);
-			})
-			.ok()?;
-		let signature = raw_payload.using_encoded(|payload| C::sign(payload, public))?;
-		let (call, tx_ext, _) = raw_payload.deconstruct();
-		let address = <Runtime as frame_system::Config>::Lookup::unlookup(account);
-		let transaction = UncheckedExtrinsic::new_signed(call, address, signature, tx_ext);
-		Some(transaction)
+	fn create_signed_transaction(
+		call: RuntimeCall,
+		(address, signature, tx_ext): Self::SignaturePayload,
+	) -> UncheckedExtrinsic {
+		UncheckedExtrinsic::new_signed(call, address, signature, tx_ext)
 	}
 }
 
@@ -625,12 +638,23 @@ impl frame_system::offchain::SigningTypes for Runtime {
 	type Signature = Signature;
 }
 
-impl<C> frame_system::offchain::SendTransactionTypes<C> for Runtime
-where
-	RuntimeCall: From<C>,
-{
+impl frame_system::offchain::CreateTransactionBase for Runtime {
 	type Extrinsic = UncheckedExtrinsic;
-	type OverarchingCall = RuntimeCall;
+	type Call = RuntimeCall;
+}
+
+impl frame_system::offchain::CreateTransaction for Runtime {
+	type Extension = TxExtension;
+
+	fn create_transaction(call: RuntimeCall, tx_ext: Self::Extension) -> UncheckedExtrinsic {
+		UncheckedExtrinsic::new_transaction(call, tx_ext)
+	}
+}
+
+impl frame_system::offchain::CreateInherent for Runtime {
+	fn create_inherent(call: RuntimeCall) -> UncheckedExtrinsic {
+		UncheckedExtrinsic::new_inherent(call)
+	}
 }
 
 parameter_types! {

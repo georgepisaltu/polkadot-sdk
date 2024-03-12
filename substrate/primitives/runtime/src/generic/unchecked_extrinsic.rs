@@ -20,8 +20,7 @@
 use crate::{
 	generic::{CheckedExtrinsic, ExtrinsicFormat},
 	traits::{
-		self, transaction_extension::TransactionExtensionBase, Checkable, CreateInherent,
-		CreateSignedTransaction, CreateTransaction, CreateTransactionBase, Dispatchable,
+		self, transaction_extension::TransactionExtensionBase, Checkable, Dispatchable,
 		ExtrinsicLike, ExtrinsicMetadata, IdentifyAccount, MaybeDisplay, Member, SignaturePayload,
 		TransactionExtension,
 	},
@@ -43,7 +42,7 @@ use sp_std::{fmt, prelude::*};
 const EXTRINSIC_FORMAT_VERSION: u8 = 5;
 
 /// The `SignaturePayload` of `UncheckedExtrinsic`.
-type UncheckedSignaturePayload<Address, Signature, Extension> = (Address, Signature, Extension);
+pub type UncheckedSignaturePayload<Address, Signature, Extension> = (Address, Signature, Extension);
 
 impl<Address: TypeInfo, Signature: TypeInfo, Extension: TypeInfo> SignaturePayload
 	for UncheckedSignaturePayload<Address, Signature, Extension>
@@ -222,41 +221,6 @@ impl<Address: TypeInfo, Call: TypeInfo, Signature: TypeInfo, Extension: TypeInfo
 	}
 }
 
-impl<Address: TypeInfo, Call: TypeInfo, Signature: TypeInfo, Extension: TypeInfo>
-	CreateTransactionBase for UncheckedExtrinsic<Address, Call, Signature, Extension>
-{
-	type Call = Call;
-}
-
-impl<Address: TypeInfo, Call: TypeInfo, Signature: TypeInfo, Extension: TypeInfo> CreateTransaction
-	for UncheckedExtrinsic<Address, Call, Signature, Extension>
-{
-	type Extension = Extension;
-
-	fn create_transaction(call: Self::Call, extension: Self::Extension) -> Self {
-		Self::new_transaction(call, extension)
-	}
-}
-
-impl<Address: TypeInfo, Call: TypeInfo, Signature: TypeInfo, Extension: TypeInfo>
-	CreateSignedTransaction for UncheckedExtrinsic<Address, Call, Signature, Extension>
-{
-	type SignaturePayload = UncheckedSignaturePayload<Address, Signature, Extension>;
-
-	fn create_signed_transaction(call: Self::Call, signed_data: Self::SignaturePayload) -> Self {
-		let (signed, signature, extension) = signed_data;
-		Self::new_signed(call, signed, signature, extension)
-	}
-}
-
-impl<Address: TypeInfo, Call: TypeInfo, Signature: TypeInfo, Extension: TypeInfo> CreateInherent
-	for UncheckedExtrinsic<Address, Call, Signature, Extension>
-{
-	fn create_inherent(call: Self::Call) -> Self {
-		Self::new_bare(call)
-	}
-}
-
 impl<LookupSource, AccountId, Call, Signature, Extension, Lookup> Checkable<Lookup>
 	for UncheckedExtrinsic<LookupSource, Call, Signature, Extension>
 where
@@ -274,7 +238,8 @@ where
 		Ok(match self.preamble {
 			Preamble::Signed(signed, signature, tx_ext) => {
 				let signed = lookup.lookup(signed)?;
-				// The `Implicit` is "implicitly" included in the payload.
+				// `Implicit` is (implicitly) included when creating the `SignedPayload` by the
+				// constructor.
 				let raw_payload = SignedPayload::new(self.function, tx_ext)?;
 				if !raw_payload.using_encoded(|payload| signature.verify(payload, &signed)) {
 					return Err(InvalidTransaction::BadProof.into())

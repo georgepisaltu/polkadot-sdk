@@ -914,14 +914,12 @@ pub trait IsInherent<Extrinsic> {
 }
 
 /// An extrinsic on which we can get access to call.
-pub trait ExtrinsicCall:
-	sp_runtime::traits::ExtrinsicLike + sp_runtime::traits::CreateTransactionBase
-{
+pub trait ExtrinsicCall<Call>: sp_runtime::traits::ExtrinsicLike {
 	/// Get the call of the extrinsic.
-	fn call(&self) -> &Self::Call;
+	fn call(&self) -> &Call;
 }
 
-impl<Address, Call, Signature, Extra> ExtrinsicCall
+impl<Address, Call, Signature, Extra> ExtrinsicCall<Call>
 	for sp_runtime::generic::UncheckedExtrinsic<Address, Call, Signature, Extra>
 where
 	Address: TypeInfo,
@@ -929,7 +927,7 @@ where
 	Signature: TypeInfo,
 	Extra: TypeInfo,
 {
-	fn call(&self) -> &Self::Call {
+	fn call(&self) -> &Call {
 		&self.function
 	}
 }
