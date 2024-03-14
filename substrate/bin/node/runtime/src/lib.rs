@@ -1411,6 +1411,8 @@ impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for R
 where
 	RuntimeCall: From<LocalCall>,
 {
+	type SignaturePayload = UncheckedSignaturePayload;
+
 	fn create_signed_transaction<
 		C: frame_system::offchain::AppCrypto<Self::Public, Self::Signature>,
 	>(
@@ -2508,6 +2510,9 @@ pub type TxExtension = (
 /// Unchecked extrinsic type as expected by this runtime.
 pub type UncheckedExtrinsic =
 	generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, TxExtension>;
+/// Unchecked signature payload type as expected by this runtime.
+pub type UncheckedSignaturePayload =
+	generic::UncheckedSignaturePayload<Address, Signature, TxExtension>;
 /// The payload being signed in transactions.
 pub type SignedPayload = generic::SignedPayload<RuntimeCall, TxExtension>;
 /// Extrinsic type that has already been checked.

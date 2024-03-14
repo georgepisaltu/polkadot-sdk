@@ -207,8 +207,6 @@ impl<Address, Call, Signature, Extension> UncheckedExtrinsic<Address, Call, Sign
 	}
 }
 
-// TODO: We can get rid of this trait and just use UncheckedExtrinsic directly.
-
 impl<Address: TypeInfo, Call: TypeInfo, Signature: TypeInfo, Extension: TypeInfo> ExtrinsicLike
 	for UncheckedExtrinsic<Address, Call, Signature, Extension>
 {
