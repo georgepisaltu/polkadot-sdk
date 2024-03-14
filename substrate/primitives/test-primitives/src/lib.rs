@@ -25,10 +25,7 @@ pub use sp_application_crypto;
 use sp_application_crypto::sr25519;
 
 pub use sp_core::{hash::H256, RuntimeDebug};
-use sp_runtime::traits::{
-	BlakeTwo256, CreateInherent, CreateSignedTransaction, CreateTransaction, CreateTransactionBase,
-	ExtrinsicLike, Verify,
-};
+use sp_runtime::traits::{BlakeTwo256, ExtrinsicLike, Verify};
 use sp_std::vec::Vec;
 
 /// Extrinsic for test-runtime.

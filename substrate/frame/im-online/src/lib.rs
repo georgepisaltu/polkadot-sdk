@@ -92,7 +92,7 @@ use frame_support::{
 	BoundedSlice, WeakBoundedVec,
 };
 use frame_system::{
-	offchain::{SendTransactionTypes, SubmitTransaction},
+	offchain::{CreateInherent, SubmitTransaction},
 	pallet_prelude::*,
 };
 pub use pallet::*;
@@ -100,7 +100,7 @@ use scale_info::TypeInfo;
 use sp_application_crypto::RuntimeAppPublic;
 use sp_runtime::{
 	offchain::storage::{MutateStorageError, StorageRetrievalError, StorageValueRef},
-	traits::{AtLeast32BitUnsigned, Convert, CreateInherent, Saturating, TrailingZeroInput},
+	traits::{AtLeast32BitUnsigned, Convert, Saturating, TrailingZeroInput},
 	PerThing, Perbill, Permill, RuntimeDebug, SaturatedConversion,
 };
 use sp_staking::{
@@ -259,7 +259,7 @@ pub mod pallet {
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: SendTransactionTypes<Call<Self>> + frame_system::Config {
+	pub trait Config: CreateInherent<Call<Self>> + frame_system::Config {
 		/// The identifier type for an authority.
 		type AuthorityId: Member
 			+ Parameter
@@ -640,7 +640,7 @@ impl<T: Config> Pallet<T> {
 				call,
 			);
 
-			let xt = T::Extrinsic::create_inherent(call.into());
+			let xt = T::create_inherent(call.into());
 			SubmitTransaction::<T, Call<T>>::submit_transaction(xt)
 				.map_err(|_| OffchainErr::SubmitTransaction)?;
 

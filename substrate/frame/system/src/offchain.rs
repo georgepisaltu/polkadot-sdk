@@ -657,7 +657,7 @@ mod tests {
 
 	type Extrinsic = UncheckedExtrinsic<u64, RuntimeCall, (), ()>;
 
-	impl SendTransactionTypes<RuntimeCall> for TestRuntime {
+	impl CreateTransactionBase<RuntimeCall> for TestRuntime {
 		type Extrinsic = Extrinsic;
 		type OverarchingCall = RuntimeCall;
 	}

@@ -124,7 +124,7 @@ use primitives::{
 use scale_info::{Type, TypeInfo};
 use sp_core::RuntimeDebug;
 use sp_runtime::{
-	traits::{AppVerify, CreateInherent, One, Saturating},
+	traits::{AppVerify, One, Saturating},
 	DispatchResult, SaturatedConversion,
 };
 use sp_std::{cmp, collections::btree_set::BTreeSet, mem, prelude::*};
@@ -600,7 +600,7 @@ pub mod pallet {
 		frame_system::Config
 		+ configuration::Config
 		+ shared::Config
-		+ frame_system::offchain::SendTransactionTypes<Call<Self>>
+		+ frame_system::offchain::CreateInherent<Call<Self>>
 	{
 		type RuntimeEvent: From<Event> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
@@ -2112,9 +2112,7 @@ impl<T: Config> Pallet<T> {
 	) {
 		use frame_system::offchain::SubmitTransaction;
 
-		let xt = T::Extrinsic::create_inherent(
-			Call::include_pvf_check_statement { stmt, signature }.into(),
-		);
+		let xt = T::create_inherent(Call::include_pvf_check_statement { stmt, signature }.into());
 		if let Err(e) = SubmitTransaction::<T, Call<T>>::submit_transaction(xt) {
 			log::error!(target: LOG_TARGET, "Error submitting pvf check statement: {:?}", e,);
 		}
