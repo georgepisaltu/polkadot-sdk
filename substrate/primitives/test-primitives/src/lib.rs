@@ -66,32 +66,6 @@ impl ExtrinsicLike for Extrinsic {
 	}
 }
 
-impl CreateTransactionBase for Extrinsic {
-	type Call = Extrinsic;
-}
-
-impl CreateInherent for Extrinsic {
-	fn create_inherent(call: Self::Call) -> Self {
-		call
-	}
-}
-
-impl CreateTransaction for Extrinsic {
-	type Extension = ();
-
-	fn create_transaction(call: Self::Call, _extension: Self::Extension) -> Self {
-		call
-	}
-}
-
-impl CreateSignedTransaction for Extrinsic {
-	type SignaturePayload = ();
-
-	fn create_signed_transaction(call: Self::Call, _extension: Self::SignaturePayload) -> Self {
-		call
-	}
-}
-
 /// The signature type used by accounts/transactions.
 pub type AccountSignature = sr25519::Signature;
 /// An identifier for an account on this system.
