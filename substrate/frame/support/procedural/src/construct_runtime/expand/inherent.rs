@@ -66,14 +66,14 @@ pub fn expand_outer_inherent(
 			fn create_extrinsics(&self) ->
 				#scrate::__private::sp_std::vec::Vec<<#block as #scrate::sp_runtime::traits::Block>::Extrinsic>
 			{
-				use #scrate::inherent::ProvideInherent;
+				use #scrate::{inherent::ProvideInherent, traits::InherentBuilder};
 
 				let mut inherents = #scrate::__private::sp_std::vec::Vec::new();
 
 				#(
 					#pallet_attrs
 					if let Some(inherent) = #pallet_names::create_inherent(self) {
-						let inherent = <#unchecked_extrinsic as #scrate::sp_runtime::traits::CreateInherent>::create_inherent(
+						let inherent = <#unchecked_extrinsic as InherentBuilder>::new_inherent(
 							inherent.into(),
 						);
 

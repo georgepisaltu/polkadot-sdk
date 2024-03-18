@@ -98,16 +98,16 @@ pub fn expand_runtime_metadata(
 
 				let ty = #scrate::__private::scale_info::meta_type::<#extrinsic>();
 				let address_ty = #scrate::__private::scale_info::meta_type::<
-						<<#runtime as #scrate::sp_runtime::traits::CreateSignedTransaction>::SignaturePayload as #scrate::sp_runtime::traits::SignaturePayload>::SignatureAddress
+						<#extrinsic as #scrate::traits::SignedTransactionBuilder>::Address
 					>();
 				let call_ty = #scrate::__private::scale_info::meta_type::<
-					<#runtime as #scrate::sp_runtime::traits::CreateTransactionBase>::Call
+						<#extrinsic as #scrate::traits::ExtrinsicCall>::Call
 					>();
 				let signature_ty = #scrate::__private::scale_info::meta_type::<
-						<<#runtime as #scrate::sp_runtime::traits::CreateSignedTransaction>::SignaturePayload as #scrate::sp_runtime::traits::SignaturePayload>::Signature
+						<#extrinsic as #scrate::traits::SignedTransactionBuilder>::Signature
 					>();
 				let extra_ty = #scrate::__private::scale_info::meta_type::<
-						<<#runtime as #scrate::sp_runtime::traits::CreateSignedTransaction>::SignaturePayload as #scrate::sp_runtime::traits::SignaturePayload>::SignatureExtra
+						<#extrinsic as #scrate::traits::SignedTransactionBuilder>::Extension
 					>();
 
 				#scrate::__private::metadata_ir::MetadataIR {

@@ -497,22 +497,6 @@ pub trait CreateInherent<LocalCall>: CreateTransactionBase<LocalCall> {
 	fn create_inherent(call: Self::OverarchingCall) -> Self::Extrinsic;
 }
 
-#[allow(deprecated)]
-impl<T, Xt, LocalCall> CreateInherent<LocalCall> for T
-where
-	T: CreateTransactionBase<
-		LocalCall,
-		Extrinsic = Xt,
-		OverarchingCall = <Xt as sp_runtime::traits::Extrinsic>::Call,
-	>,
-	Xt: sp_runtime::traits::Extrinsic,
-	LocalCall: Into<<Xt as sp_runtime::traits::Extrinsic>::Call>,
-{
-	fn create_inherent(call: Self::OverarchingCall) -> Xt {
-		<Xt as sp_runtime::traits::Extrinsic>::new_inherent(call)
-	}
-}
-
 /// A message signer.
 pub trait SignMessage<T: SigningTypes> {
 	/// A signature data.

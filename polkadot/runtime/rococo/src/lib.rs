@@ -570,6 +570,19 @@ impl pallet_grandpa::Config for Runtime {
 		pallet_grandpa::EquivocationReportSystem<Self, Offences, Historical, ReportLongevity>;
 }
 
+impl frame_system::offchain::SigningTypes for Runtime {
+	type Public = <Signature as Verify>::Signer;
+	type Signature = Signature;
+}
+
+impl<LocalCall> frame_system::offchain::CreateTransactionBase<LocalCall> for Runtime
+where
+	RuntimeCall: From<LocalCall>,
+{
+	type Extrinsic = UncheckedExtrinsic;
+	type OverarchingCall = RuntimeCall;
+}
+
 /// Submits a transaction with the node's public and signature type. Adheres to the signed
 /// extension format of the chain.
 impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for Runtime
@@ -624,23 +637,10 @@ where
 	}
 }
 
-impl frame_system::offchain::CreateInherent for Runtime {
-	fn create_inherent(call: RuntimeCall) -> UncheckedExtrinsic {
-		UncheckedExtrinsic::new_bare(call)
-	}
-}
-
-impl frame_system::offchain::SigningTypes for Runtime {
-	type Public = <Signature as Verify>::Signer;
-	type Signature = Signature;
-}
-
-impl frame_system::offchain::CreateTransactionBase for Runtime {
-	type Extrinsic = UncheckedExtrinsic;
-	type OverarchingCall = RuntimeCall;
-}
-
-impl frame_system::offchain::CreateTransaction for Runtime {
+impl<LocalCall> frame_system::offchain::CreateTransaction<LocalCall> for Runtime
+where
+	RuntimeCall: From<LocalCall>,
+{
 	type Extension = TxExtension;
 
 	fn create_transaction(call: RuntimeCall, tx_ext: Self::Extension) -> UncheckedExtrinsic {
@@ -648,9 +648,12 @@ impl frame_system::offchain::CreateTransaction for Runtime {
 	}
 }
 
-impl frame_system::offchain::CreateInherent for Runtime {
+impl<LocalCall> frame_system::offchain::CreateInherent<LocalCall> for Runtime
+where
+	RuntimeCall: From<LocalCall>,
+{
 	fn create_inherent(call: RuntimeCall) -> UncheckedExtrinsic {
-		UncheckedExtrinsic::new_inherent(call)
+		UncheckedExtrinsic::new_bare(call)
 	}
 }
 

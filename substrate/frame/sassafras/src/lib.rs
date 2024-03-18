@@ -69,7 +69,7 @@ use sp_consensus_sassafras::{
 use sp_io::hashing;
 use sp_runtime::{
 	generic::DigestItem,
-	traits::{CreateInherent, One, Zero},
+	traits::{One, Zero},
 	BoundToRuntimeAppPublic,
 };
 use sp_std::prelude::Vec;

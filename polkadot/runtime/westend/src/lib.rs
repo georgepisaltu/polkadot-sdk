@@ -799,6 +799,19 @@ impl pallet_grandpa::Config for Runtime {
 		pallet_grandpa::EquivocationReportSystem<Self, Offences, Historical, ReportLongevity>;
 }
 
+impl frame_system::offchain::SigningTypes for Runtime {
+	type Public = <Signature as Verify>::Signer;
+	type Signature = Signature;
+}
+
+impl<C> frame_system::offchain::CreateTransactionBase<C> for Runtime
+where
+	RuntimeCall: From<C>,
+{
+	type OverarchingCall = RuntimeCall;
+	type Extrinsic = UncheckedExtrinsic;
+}
+
 impl<LocalCall> frame_system::offchain::CreateTransaction<LocalCall> for Runtime
 where
 	RuntimeCall: From<LocalCall>,
@@ -825,7 +838,7 @@ where
 		public: <Signature as Verify>::Signer,
 		account: AccountId,
 		nonce: <Runtime as frame_system::Config>::Nonce,
-	) -> UncheckedExtrinsic {
+	) -> Option<UncheckedExtrinsic> {
 		use sp_runtime::traits::StaticLookup;
 		// take the biggest period possible.
 		let period =
@@ -871,19 +884,6 @@ where
 	fn create_inherent(call: RuntimeCall) -> UncheckedExtrinsic {
 		UncheckedExtrinsic::new_bare(call)
 	}
-}
-
-impl frame_system::offchain::SigningTypes for Runtime {
-	type Public = <Signature as Verify>::Signer;
-	type Signature = Signature;
-}
-
-impl<C> frame_system::offchain::CreateTransactionBase<C> for Runtime
-where
-	RuntimeCall: From<C>,
-{
-	type OverarchingCall = RuntimeCall;
-	type Extrinsic = UncheckedExtrinsic;
 }
 
 parameter_types! {
