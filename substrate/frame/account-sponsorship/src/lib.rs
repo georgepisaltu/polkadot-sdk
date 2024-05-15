@@ -33,31 +33,12 @@ use frame_support::{
 		Get,
 	},
 };
-use frame_system::pallet_prelude::*;
+use frame_system::{pallet_prelude::*, DecRefStatus};
 use sp_runtime::traits::Saturating;
 use sp_std::prelude::*;
 
 pub(crate) type BalanceOf<T> =
 	<<T as Config>::Currency as Inspect<<T as frame_system::Config>::AccountId>>::Balance;
-
-/// TODO
-#[derive(
-	Encode, Decode, Clone, Copy, PartialEq, Eq, Default, RuntimeDebug, MaxEncodedLen, TypeInfo,
-)]
-pub struct SponsorStats {
-	pub total: u16,
-	pub active: u16,
-}
-
-impl SponsorStats {
-	pub fn new(count: u16) -> Self {
-		Self { total: count, active: count }
-	}
-
-	pub fn from_parts(total: u16, active: u16) -> Self {
-		Self { total, active }
-	}
-}
 
 #[frame_support::pallet(dev_mode)]
 pub mod pallet {
@@ -79,9 +60,13 @@ pub mod pallet {
 		#[pallet::no_default_bounds]
 		type RuntimeHoldReason: From<HoldReason>;
 
-		/// The amount to be deposited for to allow sponsor one account.
+		/// The amount to be deposited for registering as an account sponsor.
 		#[pallet::no_default]
-		type AccountDeposit: Get<BalanceOf<Self>>;
+		type BaseDeposit: Get<BalanceOf<Self>>;
+
+		/// The amount to be deposited for each sponsored account.
+		#[pallet::no_default]
+		type BeneficiaryDeposit: Get<BalanceOf<Self>>;
 	}
 
 	#[pallet::error]
@@ -90,25 +75,23 @@ pub mod pallet {
 		Invalid,
 		/// Not enough.
 		NotEnoughFunds,
-		/// Not enough sponsorship credit.
-		NotEnoughCredit,
 		/// Not sponsor.
 		NotSponsor,
 		/// Not sponsored.
 		NotSponsored,
 		/// Wrong sponsor.
 		WrongSponsor,
-		/// Account already exists.
-		AlreadyExists,
+		// /// Account already exists.
+		// AlreadyExists,
+		/// Beneficiary account would be reaped without sponsorship.
+		Dependent,
 	}
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(crate) fn deposit_event)]
 	pub enum Event<T: Config> {
-		/// Sponsor increased their deposit.
-		SponsorshipIncreased { who: T::AccountId, old: u16, new: u16 },
-		/// Sponsor decreased their deposit.
-		SponsorshipDecreased { who: T::AccountId, old: u16, new: u16 },
+		/// TODO.
+		Dummy,
 	}
 
 	#[pallet::pallet]
@@ -133,9 +116,19 @@ pub mod pallet {
 		}
 	}
 
+	#[pallet::type_value]
+	pub fn DepositOnEmpty<T: Config>() -> BalanceOf<T> {
+		T::Currency::minimum_balance()
+	}
+
 	/// Sponsor stats.
 	#[pallet::storage]
-	pub type Sponsors<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, SponsorStats>;
+	pub type AccountDeposit<T: Config> =
+		StorageValue<_, BalanceOf<T>, ValueQuery, DepositOnEmpty<T>>;
+
+	/// Sponsor stats.
+	#[pallet::storage]
+	pub type Sponsors<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, u16>;
 
 	/// Sponsor stats.
 	#[pallet::storage]
@@ -144,75 +137,23 @@ pub mod pallet {
 	/// The reason for this pallet placing a hold on funds.
 	#[pallet::composite_enum]
 	pub enum HoldReason {
-		/// The funds are held as a deposit for sponsoring accounts.
+		/// The funds are held as a deposit for registering as an account sponsor.
 		#[codec(index = 0)]
-		AccountSponsorship,
+		SponsorshipDeposit,
+		/// The funds are held as a deposit for sponsoring a beneficiary account.
+		#[codec(index = 1)]
+		BeneficiaryDeposit,
+		/// The funds are held as an existential deposit for a beneficiary account.
+		#[codec(index = 2)]
+		ExistentialDeposit,
 	}
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// TODO
-		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::zero())]
-		pub fn deposit_for_accounts(origin: OriginFor<T>, count: u16) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-
-			let deposit = Self::calculate_deposit(count);
-			T::Currency::hold(&HoldReason::AccountSponsorship.into(), &who, deposit)
-				.map_err(|_| <Error<T>>::NotEnoughFunds)?;
-
-			let (old, new) = Sponsors::<T>::mutate(&who, |maybe_stats| {
-				let old_stats = maybe_stats.unwrap_or_default();
-				let new_stats = SponsorStats::from_parts(
-					old_stats.total.saturating_add(count),
-					old_stats.active,
-				);
-				*maybe_stats = Some(new_stats);
-				(old_stats.total, new_stats.total)
-			});
-
-			Self::deposit_event(Event::<T>::SponsorshipIncreased { who, old, new });
-
-			Ok(())
-		}
-
-		/// TODO
-		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::zero())]
-		pub fn withdraw_deposit(origin: OriginFor<T>, count: u16) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-
-			let deposit = Self::calculate_deposit(count);
-			ensure!(
-				T::Currency::balance_on_hold(&HoldReason::AccountSponsorship.into(), &who) >=
-					deposit,
-				Error::<T>::NotEnoughFunds
-			);
-
-			let (old, new) = Sponsors::<T>::try_mutate(&who, |maybe_stats| {
-				let old_stats =
-					maybe_stats.map(|stats| stats.clone()).ok_or(Error::<T>::NotSponsor)?;
-				let new_total =
-					old_stats.total.checked_sub(count).ok_or(Error::<T>::NotEnoughFunds)?;
-				ensure!(new_total >= old_stats.active, Error::<T>::NotEnoughFunds);
-				let new_stats = SponsorStats::from_parts(new_total, old_stats.active);
-				*maybe_stats = Some(new_stats);
-				Ok::<(u16, u16), Error<T>>((old_stats.total, new_total))
-			})?;
-			T::Currency::release(
-				&HoldReason::AccountSponsorship.into(),
-				&who,
-				deposit,
-				Precision::Exact,
-			)
-			.map_err(|_| Error::<T>::NotEnoughFunds)?;
-
-			Self::deposit_event(Event::<T>::SponsorshipDecreased { who, old, new });
-
-			Ok(())
-		}
-
-		/// TODO
+		/// Sponsor an account's existence by placing a deposit in this pallet.
+		///
+		/// Accounts can only have one sponsor at a time. Also, sponsored accounts cannot themselves
+		/// sponsor other accounts.
 		#[pallet::call_index(2)]
 		#[pallet::weight(Weight::zero())]
 		pub fn sponsor(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
@@ -222,20 +163,12 @@ pub mod pallet {
 			ensure!(!Sponsors::<T>::contains_key(&target), Error::<T>::Invalid);
 			ensure!(!Beneficiaries::<T>::contains_key(&target), Error::<T>::Invalid);
 
-			Sponsors::<T>::try_mutate(&who, |maybe_stats| {
-				let mut stats =
-					maybe_stats.map(|stats| stats.clone()).ok_or(Error::<T>::NotSponsor)?;
-				stats.active = stats.active.saturating_add(1);
-				ensure!(stats.active <= stats.total, Error::<T>::NotEnoughCredit);
-				*maybe_stats = Some(stats);
-				Ok::<(), Error<T>>(())
-			})?;
-			frame_system::Pallet::<T>::inc_providers(&target);
-			Beneficiaries::<T>::insert(target, who);
+			Self::add_beneficiary(&who, &target)?;
+
 			Ok(())
 		}
 
-		/// TODO
+		/// Withdraw sponsorship for an account's existence, releasing the associated deposit.
 		#[pallet::call_index(3)]
 		#[pallet::weight(Weight::zero())]
 		pub fn withdraw_sponsorship(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
@@ -245,30 +178,123 @@ pub mod pallet {
 				Beneficiaries::<T>::get(&target).ok_or(Error::<T>::NotSponsored)? == who,
 				Error::<T>::WrongSponsor
 			);
-			Sponsors::<T>::try_mutate(&who, |maybe_stats| {
-				let mut stats =
-					maybe_stats.map(|stats| stats.clone()).ok_or(Error::<T>::NotSponsor)?;
-				stats.active = stats.active.checked_sub(1).ok_or(Error::<T>::Invalid)?;
-				*maybe_stats = Some(stats);
-				Ok::<(), Error<T>>(())
-			})?;
-			frame_system::Pallet::<T>::dec_providers(&target)?;
-			Beneficiaries::<T>::remove(target);
+
+			Self::remove_beneficiary(&who, &target)?;
+
 			Ok(())
 		}
 
-		/// TODO
-		#[pallet::call_index(4)]
+		/// Remove an account as a beneficiary of an account existence sponsorship.
+		///
+		/// This will fail if the account cannot exist independently after the sponsorship is
+		/// removed.
+		#[pallet::call_index(5)]
 		#[pallet::weight(Weight::zero())]
-		pub fn todo4(_origin: OriginFor<T>) -> DispatchResult {
-			todo!();
+		pub fn become_independent(origin: OriginFor<T>) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let sponsor = Beneficiaries::<T>::get(&who).ok_or(Error::<T>::NotSponsored)?;
+
+			Self::remove_beneficiary(&sponsor, &who)?;
+
+			Ok(())
 		}
 	}
 
 	impl<T: Config> Pallet<T> {
-		/// Calculate the deposit required for sponsoring the existence of `count` accounts.
-		pub fn calculate_deposit(count: u16) -> BalanceOf<T> {
-			T::AccountDeposit::get().saturating_mul(count.into())
+		// Convenience function to hold both the beneficiary and existential deposits for an
+		// account.
+		fn hold_deposit(who: &T::AccountId) -> Result<(), Error<T>> {
+			T::Currency::hold(
+				&HoldReason::BeneficiaryDeposit.into(),
+				who,
+				T::BeneficiaryDeposit::get(),
+			)
+			.map_err(|_| <Error<T>>::NotEnoughFunds)?;
+			T::Currency::hold(
+				&HoldReason::ExistentialDeposit.into(),
+				who,
+				AccountDeposit::<T>::get(),
+			)
+			.map_err(|_| <Error<T>>::NotEnoughFunds)?;
+			Ok(())
+		}
+
+		// Convenience function to release both the beneficiary and existential deposits for an
+		// account.
+		fn release_deposit(who: &T::AccountId) -> Result<(), Error<T>> {
+			T::Currency::release(
+				&HoldReason::BeneficiaryDeposit.into(),
+				who,
+				T::BeneficiaryDeposit::get(),
+				Precision::Exact,
+			)
+			.map_err(|_| <Error<T>>::NotEnoughFunds)?;
+			T::Currency::release(
+				&HoldReason::ExistentialDeposit.into(),
+				who,
+				AccountDeposit::<T>::get(),
+				Precision::Exact,
+			)
+			.map_err(|_| <Error<T>>::NotEnoughFunds)?;
+			Ok(())
+		}
+
+		fn add_beneficiary(sponsor: &T::AccountId, beneficiary: &T::AccountId) -> DispatchResult {
+			Sponsors::<T>::try_mutate(&sponsor, |maybe_beneficiary_count| {
+				let mut beneficiary_count = match maybe_beneficiary_count {
+					Some(count) => *count,
+					None => {
+						T::Currency::hold(
+							&HoldReason::SponsorshipDeposit.into(),
+							&sponsor,
+							T::BaseDeposit::get(),
+						)
+						.map_err(|_| <Error<T>>::NotEnoughFunds)?;
+						0
+					},
+				};
+				beneficiary_count.saturating_inc();
+				*maybe_beneficiary_count = Some(beneficiary_count);
+				Ok::<(), Error<T>>(())
+			})?;
+			Self::hold_deposit(&sponsor)?;
+			frame_system::Pallet::<T>::inc_providers(&beneficiary);
+			Beneficiaries::<T>::insert(beneficiary, sponsor);
+			Ok(())
+		}
+
+		fn remove_beneficiary(
+			sponsor: &T::AccountId,
+			beneficiary: &T::AccountId,
+		) -> DispatchResult {
+			Sponsors::<T>::try_mutate(&sponsor, |maybe_beneficiary_count| {
+				let mut beneficiary_count =
+					maybe_beneficiary_count.ok_or(Error::<T>::NotSponsor)?;
+				beneficiary_count = beneficiary_count.checked_sub(1).ok_or(Error::<T>::Invalid)?;
+				*maybe_beneficiary_count = if beneficiary_count == 0 {
+					T::Currency::release(
+						&HoldReason::SponsorshipDeposit.into(),
+						&sponsor,
+						T::BaseDeposit::get(),
+						Precision::Exact,
+					)
+					.map_err(|_| <Error<T>>::Invalid)?;
+					None
+				} else {
+					Some(beneficiary_count)
+				};
+				Ok::<(), Error<T>>(())
+			})?;
+			ensure!(
+				matches!(
+					frame_system::Pallet::<T>::dec_providers(&beneficiary)?,
+					DecRefStatus::Exists
+				),
+				Error::<T>::Dependent
+			);
+			Self::release_deposit(sponsor)?;
+			Beneficiaries::<T>::remove(beneficiary);
+			Ok(())
 		}
 	}
 }
