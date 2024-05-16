@@ -34,7 +34,7 @@ use frame_support::{
 	},
 };
 use frame_system::{pallet_prelude::*, DecRefStatus};
-use sp_runtime::traits::Saturating;
+use sp_runtime::traits::{AccountExistenceProvider, Saturating};
 use sp_std::prelude::*;
 
 pub(crate) type BalanceOf<T> =
@@ -121,16 +121,17 @@ pub mod pallet {
 		T::Currency::minimum_balance()
 	}
 
-	/// Sponsor stats.
+	/// The amount to be held to provide for an accounts existence. Defaults to the existential
+	/// deposit of the underlying currency type.
 	#[pallet::storage]
 	pub type AccountDeposit<T: Config> =
 		StorageValue<_, BalanceOf<T>, ValueQuery, DepositOnEmpty<T>>;
 
-	/// Sponsor stats.
+	/// Map of sponsors and their respective beneficiary count.
 	#[pallet::storage]
 	pub type Sponsors<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, u16>;
 
-	/// Sponsor stats.
+	/// Map of the beneficiaries and their respective sponsors.
 	#[pallet::storage]
 	pub type Beneficiaries<T: Config> = StorageMap<_, Blake2_128, T::AccountId, T::AccountId>;
 
@@ -152,6 +153,14 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// Sponsor an account's existence by placing a deposit in this pallet.
 		///
+		/// The deposit is calculated as follows:
+		/// - if there is at least one beneficiary associated with a sponsor, then `T::BaseDeposit`
+		///   is held to account for the entry in `Sponsors<T>`;
+		/// - for each beneficiary, `T::BeneficiaryDeposit` is held to account for the entry in
+		///   `Beneficiaries<T>`;
+		/// - for each beneficiary, `ExistentialDeposit<T>` is held to provide for the account's
+		///   existence and storing its nonce.
+		///
 		/// Accounts can only have one sponsor at a time. Also, sponsored accounts cannot themselves
 		/// sponsor other accounts.
 		#[pallet::call_index(2)]
@@ -168,7 +177,8 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// Withdraw sponsorship for an account's existence, releasing the associated deposit.
+		/// Withdraw sponsorship for an account's existence, releasing the associated deposit. The
+		/// beneficiary's account might be reaped if the sponsorship is its only provider.
 		#[pallet::call_index(3)]
 		#[pallet::weight(Weight::zero())]
 		pub fn withdraw_sponsorship(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
@@ -179,7 +189,7 @@ pub mod pallet {
 				Error::<T>::WrongSponsor
 			);
 
-			Self::remove_beneficiary(&who, &target)?;
+			Self::remove_beneficiary(&who, &target, true)?;
 
 			Ok(())
 		}
@@ -194,7 +204,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let sponsor = Beneficiaries::<T>::get(&who).ok_or(Error::<T>::NotSponsored)?;
 
-			Self::remove_beneficiary(&sponsor, &who)?;
+			Self::remove_beneficiary(&sponsor, &who, false)?;
 
 			Ok(())
 		}
@@ -266,6 +276,7 @@ pub mod pallet {
 		fn remove_beneficiary(
 			sponsor: &T::AccountId,
 			beneficiary: &T::AccountId,
+			expendable: bool,
 		) -> DispatchResult {
 			Sponsors::<T>::try_mutate(&sponsor, |maybe_beneficiary_count| {
 				let mut beneficiary_count =
@@ -285,16 +296,22 @@ pub mod pallet {
 				};
 				Ok::<(), Error<T>>(())
 			})?;
-			ensure!(
-				matches!(
-					frame_system::Pallet::<T>::dec_providers(&beneficiary)?,
-					DecRefStatus::Exists
-				),
-				Error::<T>::Dependent
-			);
+
+			match frame_system::Pallet::<T>::dec_providers(&beneficiary)? {
+				DecRefStatus::Reaped if !expendable => return Err(Error::<T>::Dependent.into()),
+				_ => (),
+			}
 			Self::release_deposit(sponsor)?;
 			Beneficiaries::<T>::remove(beneficiary);
 			Ok(())
+		}
+	}
+
+	impl<T: Config> AccountExistenceProvider<T::AccountId> for Pallet<T> {
+		fn provide(provider: &T::AccountId, beneficiary: &T::AccountId) -> DispatchResult {
+			ensure!(!Sponsors::<T>::contains_key(beneficiary), Error::<T>::Invalid);
+			ensure!(!Beneficiaries::<T>::contains_key(beneficiary), Error::<T>::Invalid);
+			Self::add_beneficiary(provider, beneficiary)
 		}
 	}
 }
