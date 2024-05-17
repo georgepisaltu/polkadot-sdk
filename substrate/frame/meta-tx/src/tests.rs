@@ -262,6 +262,22 @@ fn nonexistent_account_meta_tx() {
 		assert_eq!(bob_balance - tx_fee - provider_deposit, Balances::free_balance(&bob_account));
 		assert_eq!(provider_deposit, Balances::total_balance_on_hold(&bob_account));
 
+		// Alice has just been sponsored, the sponsorship cannot be withdrawn yet.
+		assert_eq!(
+			AccountSponsorship::withdraw_sponsorship(
+				Some(bob_account.clone()).into(),
+				alice_account.clone()
+			)
+			.unwrap_err(),
+			pallet_account_sponsorship::Error::<Runtime>::EarlyWithdrawal.into()
+		);
+
+		// Let the grace period pass.
+		let grace_period =
+			<<Runtime as pallet_account_sponsorship::Config>::GracePeriod as sp_core::Get<u64>>::get();
+		System::set_block_number(System::block_number() + grace_period);
+
+		// Bob can now withdraw his sponsorship and release the deposit.
 		frame_support::assert_ok!(AccountSponsorship::withdraw_sponsorship(
 			Some(bob_account.clone()).into(),
 			alice_account.clone()

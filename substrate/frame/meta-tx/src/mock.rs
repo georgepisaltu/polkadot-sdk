@@ -97,6 +97,7 @@ impl pallet_account_sponsorship::Config for Runtime {
 	type RuntimeHoldReason = RuntimeHoldReason;
 	type BaseDeposit = ConstU64<5>;
 	type BeneficiaryDeposit = ConstU64<1>;
+	type GracePeriod = ConstU64<10>;
 }
 
 construct_runtime!(
