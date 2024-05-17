@@ -196,7 +196,7 @@ pub mod pallet {
 				Beneficiaries::<T>::get(&target).ok_or(Error::<T>::NotSponsored)?;
 			ensure!(sponsor == who, Error::<T>::WrongSponsor);
 			let now = frame_system::Pallet::<T>::block_number();
-			ensure!(now > grace_period_end, Error::<T>::EarlyWithdrawal);
+			ensure!(now >= grace_period_end, Error::<T>::EarlyWithdrawal);
 
 			Self::remove_beneficiary(&who, &target, true)?;
 
