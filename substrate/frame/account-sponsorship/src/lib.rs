@@ -16,6 +16,59 @@
 // limitations under the License.
 
 //! # Account sponsorship pallet.
+//!
+//! This pallet provides a way to allow nonexistent, virtual accounts to exist before they acquire
+//! ED or other means of providing for themselves and storing their nonce in
+//! [`frame_system`](frame_system::Account).
+//!
+//! ## Pallet API
+//!
+//! The pallet exposes 3 main entry points:
+//! - [`sponsor`](Pallet::sponsor) which allows a `sponsor` origin to put up a deposit in order to
+//!   sponsor the existence of another beneficiary account;
+//! - [`withdraw_sponsorship`](Pallet::withdraw_sponsorship), the inverse of
+//!   [`sponsor`](`Pallet::sponsor`), which enables a `sponsor` origin to release a sponsorship
+//!   deposit and stop providing for a beneficiary account;
+//! - [`become_independent`](Pallet::become_independent) which enables a `beneficiary` origin to
+//!   renounce the sponsorship provided by a sponsor and release the associated deposit as long as
+//!   the account will be able to provide for itself without it.
+//!
+//! Additionally, the pallet implements the [`AccountExistenceProvider`](AccountExistenceProvider)
+//! interface, where [`provide`](AccountExistenceProvider::provide) mirrors
+//! [`sponsor`](Pallet::sponsor) and provides for accounts using the same deposit mechanics.
+//!
+//! See the [`pallet`] module for more information about the interfaces this pallet exposes,
+//! including its configuration trait, dispatchables, storage items, events and errors.
+//!
+//! ## Overview
+//!
+//! The pallet's main function is to allow nonexistent accounts to safely store a nonce. To do this,
+//! other accounts, referred to as sponsors from this point onwards, put up funds as deposits. As
+//! long as the funds are held, the nonce storage is paid for and the beneficiary accounts can
+//! safely exist.
+//!
+//! The deposit held for a given sponsor is made up of 3 components:
+//! - [`T::BaseDeposit`](pallet::Config::BaseDeposit) which any sponsor has to put up if they
+//!   sponsor one or more accounts. This accounts for the storage used in
+//!   [`Sponsors`](pallet::Sponsors).
+//! - [`T::BeneficiaryDeposit`](pallet::Config::BeneficiaryDeposit) which is held per beneficiary
+//!   sponsored. This accounts for the storage used in [`Beneficiaries`](pallet::Beneficiaries).
+//! - [`AccountDeposit`](pallet::AccountDeposit) which is held per beneficiary sponsored. This
+//!   accounts for the storage used by the beneficiaries nonce and other account data. Unless set
+//!   (still to be implemented in a separate extrinsic), this defaults to the existential deposit of
+//!   the underlying currency.
+//!
+//! For example, an account which sponsors 3 other accounts would have to deposit an amount equal to
+//! `BaseDeposit + 3 * BeneficiaryDeposit + 3 * AccountDeposit`.
+//!
+//! Sponsorships come with a grace period specified by
+//! [`T::GracePeriod`](pallet::Config::GracePeriod). The grace period starts when the sponsorship
+//! takes effect and during this time, the sponsor cannot reclaim their sponsorship and associated
+//! deposit from the beneficiary. This is a protection mechanism put in place for beneficiaries to
+//! give them time to acquire ED or other means of providing for their account. A beneficiary can
+//! renounce their sponsorship using the [`become_independent`](Pallet::become_independent)
+//! extrinsic before the grace period ends. A [`T::GracePeriod`](pallet::Config::GracePeriod) value
+//! of `0` will effectively disable this mechanism.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -69,7 +122,8 @@ pub mod pallet {
 		type BeneficiaryDeposit: Get<BalanceOf<Self>>;
 
 		/// Period of time in blocks for which a beneficiary's sponsorship cannot be withdrawn by
-		/// the sponsor. The beneficiary can renounce the sponsorship before this period ends.
+		/// the sponsor. The beneficiary can renounce the sponsorship before this period ends. A
+		/// value of `0` will disable the grace period mechanism altogether.
 		#[pallet::no_default]
 		type GracePeriod: Get<BlockNumberFor<Self>>;
 	}
@@ -171,7 +225,7 @@ pub mod pallet {
 		///
 		/// Accounts can only have one sponsor at a time. Also, sponsored accounts cannot themselves
 		/// sponsor other accounts.
-		#[pallet::call_index(2)]
+		#[pallet::call_index(0)]
 		#[pallet::weight(Weight::zero())]
 		pub fn sponsor(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
@@ -185,9 +239,15 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// Withdraw sponsorship for an account's existence, releasing the associated deposit. The
-		/// beneficiary's account might be reaped if the sponsorship is its only provider.
-		#[pallet::call_index(3)]
+		/// Withdraw sponsorship for an account's existence, releasing the associated deposit.
+		///
+		/// The sponsorship can be withdrawn only after `T::GracePeriod` blocks have passed since
+		/// the sponsorship came into effect. This is to protect the beneficiary and give them a
+		/// chance to acquire ED or other means of providing for their account, other than the
+		/// sponsor's deposit.
+		///
+		/// The beneficiary's account might be reaped if the sponsorship is its only provider.
+		#[pallet::call_index(1)]
 		#[pallet::weight(Weight::zero())]
 		pub fn withdraw_sponsorship(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
@@ -207,7 +267,7 @@ pub mod pallet {
 		///
 		/// This will fail if the account cannot exist independently after the sponsorship is
 		/// removed.
-		#[pallet::call_index(5)]
+		#[pallet::call_index(2)]
 		#[pallet::weight(Weight::zero())]
 		pub fn become_independent(origin: OriginFor<T>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
