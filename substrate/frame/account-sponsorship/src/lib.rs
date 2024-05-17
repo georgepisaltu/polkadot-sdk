@@ -67,6 +67,11 @@ pub mod pallet {
 		/// The amount to be deposited for each sponsored account.
 		#[pallet::no_default]
 		type BeneficiaryDeposit: Get<BalanceOf<Self>>;
+
+		/// Period of time in blocks for which a beneficiary's sponsorship cannot be withdrawn by
+		/// the sponsor. The beneficiary can renounce the sponsorship before this period ends.
+		#[pallet::no_default]
+		type GracePeriod: Get<BlockNumberFor<Self>>;
 	}
 
 	#[pallet::error]
@@ -85,6 +90,8 @@ pub mod pallet {
 		// AlreadyExists,
 		/// Beneficiary account would be reaped without sponsorship.
 		Dependent,
+		/// Sponsorship can't be withdrawn during grace period.
+		EarlyWithdrawal,
 	}
 
 	#[pallet::event]
@@ -131,9 +138,10 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type Sponsors<T: Config> = StorageMap<_, Twox64Concat, T::AccountId, u16>;
 
-	/// Map of the beneficiaries and their respective sponsors.
+	/// Map of the beneficiaries and their respective sponsors and last block of the grace period.
 	#[pallet::storage]
-	pub type Beneficiaries<T: Config> = StorageMap<_, Blake2_128, T::AccountId, T::AccountId>;
+	pub type Beneficiaries<T: Config> =
+		StorageMap<_, Blake2_128, T::AccountId, (T::AccountId, BlockNumberFor<T>)>;
 
 	/// The reason for this pallet placing a hold on funds.
 	#[pallet::composite_enum]
@@ -184,10 +192,11 @@ pub mod pallet {
 		pub fn withdraw_sponsorship(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			ensure!(<frame_system::Pallet<T>>::account_exists(&target), Error::<T>::Invalid);
-			ensure!(
-				Beneficiaries::<T>::get(&target).ok_or(Error::<T>::NotSponsored)? == who,
-				Error::<T>::WrongSponsor
-			);
+			let (sponsor, grace_period_end) =
+				Beneficiaries::<T>::get(&target).ok_or(Error::<T>::NotSponsored)?;
+			ensure!(sponsor == who, Error::<T>::WrongSponsor);
+			let now = frame_system::Pallet::<T>::block_number();
+			ensure!(now > grace_period_end, Error::<T>::EarlyWithdrawal);
 
 			Self::remove_beneficiary(&who, &target, true)?;
 
@@ -202,7 +211,7 @@ pub mod pallet {
 		#[pallet::weight(Weight::zero())]
 		pub fn become_independent(origin: OriginFor<T>) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			let sponsor = Beneficiaries::<T>::get(&who).ok_or(Error::<T>::NotSponsored)?;
+			let (sponsor, _) = Beneficiaries::<T>::get(&who).ok_or(Error::<T>::NotSponsored)?;
 
 			Self::remove_beneficiary(&sponsor, &who, false)?;
 
@@ -269,7 +278,9 @@ pub mod pallet {
 			})?;
 			Self::hold_deposit(&sponsor)?;
 			frame_system::Pallet::<T>::inc_providers(&beneficiary);
-			Beneficiaries::<T>::insert(beneficiary, sponsor);
+			let grace_period_end =
+				frame_system::Pallet::<T>::block_number().saturating_add(T::GracePeriod::get());
+			Beneficiaries::<T>::insert(beneficiary, (sponsor, grace_period_end));
 			Ok(())
 		}
 
