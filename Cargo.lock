@@ -10156,6 +10156,7 @@ dependencies = [
  "frame-benchmarking",
  "frame-support",
  "frame-system",
+ "pallet-assets",
  "pallet-balances",
  "pallet-transaction-payment",
  "parity-scale-codec",

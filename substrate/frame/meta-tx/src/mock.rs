@@ -22,9 +22,10 @@ use crate as pallet_meta_tx;
 use crate::*;
 use frame_support::{
 	construct_runtime, derive_impl,
+	traits::AsEnsureOriginWithArg,
 	weights::{FixedFee, NoFee},
 };
-use sp_core::ConstU8;
+use sp_core::{ConstU32, ConstU8};
 use sp_runtime::{traits::IdentityLookup, MultiSignature};
 
 pub type Balance = u64;
@@ -46,22 +47,13 @@ pub type Extension = (
 pub type UncheckedExtrinsic =
 	sp_runtime::generic::UncheckedExtrinsic<AccountId, RuntimeCall, Signature, Extension>;
 
-pub type MetaTxExtension = (
-	frame_system::CheckNonZeroSender<Runtime>,
-	frame_system::CheckSpecVersion<Runtime>,
-	frame_system::CheckTxVersion<Runtime>,
-	frame_system::CheckGenesis<Runtime>,
-	frame_system::CheckMortality<Runtime>,
-	frame_system::CheckNonce<Runtime>,
-);
-
 impl Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type RuntimeCall = RuntimeCall;
 	type Signature = Signature;
 	type PublicKey = <Signature as Verify>::Signer;
-	type Context = ();
-	type Extension = MetaTxExtension;
+	type MaxMultiSigners = ConstU32<3>;
+	type MaxMultisignerTxCount = ConstU32<16>;
 }
 
 #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
@@ -90,12 +82,24 @@ impl pallet_transaction_payment::Config for Runtime {
 	type FeeMultiplierUpdate = ();
 }
 
+#[derive_impl(pallet_assets::config_preludes::TestDefaultConfig)]
+impl pallet_assets::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type CreateOrigin = AsEnsureOriginWithArg<frame_system::EnsureSigned<AccountId>>;
+	type ForceOrigin = frame_system::EnsureRoot<AccountId>;
+	type Freezer = ();
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
+}
+
 construct_runtime!(
 	pub enum Runtime {
 		System: frame_system,
 		Balances: pallet_balances,
 		MetaTx: pallet_meta_tx,
 		TxPayment: pallet_transaction_payment,
+		Assets: pallet_assets,
 	}
 );
 
