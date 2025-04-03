@@ -2,8 +2,8 @@
 
 ## Identity Pallet
 
-- [`Config`]
-- [`Call`]
+- [`identity::Config`](https://docs.rs/pallet-identity/latest/pallet_identity/trait.Config.html)
+- [`Call`](https://docs.rs/pallet-identity/latest/pallet_identity/enum.Call.html)
 
 ### Overview
 
@@ -50,25 +50,29 @@ lookup in the `UsernameOf` map for any given account.
 
 #### Dispatchable Functions
 
-##### For General Users
+##### For account-based users
 - `set_identity` - Set the associated identity of an account; a small deposit is reserved if not
   already taken.
 - `clear_identity` - Remove an account's associated identity; the deposit is returned.
 - `request_judgement` - Request a judgement from a registrar, paying a fee.
 - `cancel_request` - Cancel the previous request for a judgement.
 - `accept_username` - Accept a username issued by a username authority.
-- `remove_expired_approval` - Remove a username that was issued but never accepted.
 - `set_primary_username` - Set a given username as an account's primary.
-- `remove_username` - Remove a username after its grace period has ended.
 
-##### For General Users with Sub-Identities
+#### For account-based users with sub-identities
 - `set_subs` - Set the sub-accounts of an identity.
 - `add_sub` - Add a sub-identity to an identity.
 - `remove_sub` - Remove a sub-identity of an identity.
 - `rename_sub` - Rename a sub-identity of an identity.
 - `quit_sub` - Remove a sub-identity of an identity (called by the sub-identity).
 
-##### For Registrars
+#### For People, i.e. users who have proven their personhood
+- `set_personal_identity` - Sets the username and on-chain account for a person.
+- `submit_personal_credential_evidence` - Open a case for an oracle to judge a social credential of
+  a person.
+- `clear_personal_identity` - Clear a person's username and personal identity information.
+
+#### For registrars
 - `set_fee` - Set the fee required to be paid for a judgement to be given by the registrar.
 - `set_fields` - Set the fields that a registrar cares about in their judgements.
 - `provide_judgement` - Provide a judgement to an identity.
@@ -83,6 +87,12 @@ lookup in the `UsernameOf` map for any given account.
 - `add_username_authority` - Add an account with the ability to issue usernames.
 - `remove_username_authority` - Remove an account with the ability to issue usernames.
 - `kill_username` - Forcibly remove a username.
+- `personal_credential_judged` - Callback for the oracle to enforce the judgement of a social
+  credential.
+
+#### For anyone
+- `remove_expired_approval` - Remove a username that was issued but never accepted.
+- `remove_username` - Remove a username after its grace period has ended.
 
 [`Call`]: ./enum.Call.html
 [`Config`]: ./trait.Config.html

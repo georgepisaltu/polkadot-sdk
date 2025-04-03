@@ -22,11 +22,11 @@
 use super::*;
 
 use crate::{migration::v2::LazyMigrationV1ToV2, Pallet as Identity};
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use frame_benchmarking::{account, v2::*, whitelisted_caller, BenchmarkError};
 use frame_support::{
 	assert_ok, ensure,
-	traits::{EnsureOrigin, Get, OnFinalize, OnInitialize},
+	traits::{EnsureOrigin, Get, OnFinalize, OnInitialize, PalletInfoAccess},
 };
 use frame_system::RawOrigin;
 use sp_io::crypto::{sr25519_generate, sr25519_sign};
@@ -83,7 +83,7 @@ fn create_sub_accounts<T: Config>(
 ) -> Result<Vec<(T::AccountId, Data)>, &'static str> {
 	let mut subs = Vec::new();
 	let who_origin = RawOrigin::Signed(who.clone());
-	let data = Data::Raw(vec![0; 32].try_into().unwrap());
+	let data = Data::Raw(alloc::vec![0; 32].try_into().unwrap());
 
 	for i in 0..s {
 		let sub_account = account("sub", i, SEED);
@@ -500,7 +500,7 @@ mod benchmarks {
 		let caller: T::AccountId = whitelisted_caller();
 		let _ = add_sub_accounts::<T>(&caller, s)?;
 		let sub = account("new_sub", 0, SEED);
-		let data = Data::Raw(vec![0; 32].try_into().unwrap());
+		let data = Data::Raw(alloc::vec![0; 32].try_into().unwrap());
 
 		ensure!(SubsOf::<T>::get(&caller).1.len() as u32 == s, "Subs not set.");
 
@@ -516,7 +516,7 @@ mod benchmarks {
 	fn rename_sub(s: Linear<1, { T::MaxSubAccounts::get() }>) -> Result<(), BenchmarkError> {
 		let caller: T::AccountId = whitelisted_caller();
 		let (sub, _) = add_sub_accounts::<T>(&caller, s)?.remove(0);
-		let data = Data::Raw(vec![1; 32].try_into().unwrap());
+		let data = Data::Raw(alloc::vec![1; 32].try_into().unwrap());
 
 		ensure!(SuperOf::<T>::get(&sub).unwrap().1 != data, "data already set");
 
@@ -551,7 +551,7 @@ mod benchmarks {
 		Identity::<T>::add_sub(
 			sup_origin,
 			T::Lookup::unlookup(caller.clone()),
-			Data::Raw(vec![0; 32].try_into().unwrap()),
+			Data::Raw(alloc::vec![0; 32].try_into().unwrap()),
 		)?;
 		ensure!(SuperOf::<T>::contains_key(&caller), "Sub doesn't exists");
 
@@ -598,7 +598,7 @@ mod benchmarks {
 		));
 
 		#[extrinsic_call]
-		_(origin as T::RuntimeOrigin, suffix.into(), authority_lookup);
+		_(origin as T::RuntimeOrigin, suffix, authority_lookup);
 
 		assert_last_event::<T>(Event::<T>::AuthorityRemoved { authority }.into());
 		Ok(())
@@ -717,10 +717,10 @@ mod benchmarks {
 		};
 		Identity::<T>::queue_acceptance(&caller, username.clone(), provider);
 
-		let expected_expiration =
+		let expected_exiration =
 			frame_system::Pallet::<T>::block_number() + T::PendingUsernameExpiration::get();
 
-		run_to_block::<T>(expected_expiration + One::one());
+		run_to_block::<T>(expected_exiration + One::one());
 
 		#[extrinsic_call]
 		_(RawOrigin::Signed(caller.clone()), username);
@@ -870,6 +870,361 @@ mod benchmarks {
 			},
 			_ => unreachable!(),
 		}
+		Ok(())
+	}
+
+	#[benchmark]
+	fn set_personal_identity() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		// Verify signature here to avoid surprise errors at runtime
+		assert!(signature.verify(&alias[..], &public.into()));
+
+		#[extrinsic_call]
+		set_personal_identity(
+			origin as T::RuntimeOrigin,
+			who_account.clone(),
+			signature.into(),
+			username.clone(),
+		);
+
+		assert_has_event::<T>(
+			Event::<T>::PersonalIdentitySet { alias, account: who_account, username }.into(),
+		);
+		Ok(())
+	}
+
+	#[benchmark]
+	fn submit_personal_credential_evidence() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		let credential = Social::Github {
+			username: username
+				.to_vec()
+				.try_into()
+				.expect("username len checked in integrity test; qed"),
+		};
+		PersonIdentities::<T>::insert(
+			alias,
+			PersonalIdentity {
+				account: who_account.clone(),
+				pending_judgements: Default::default(),
+				banned: false,
+				username_last_reported_at: None,
+			},
+		);
+		let registration = Registration {
+			judgements: alloc::vec![(RegistrarIndex::MAX, Judgement::External)].try_into().unwrap(),
+			deposit: 0u32.into(),
+			info: Default::default(),
+		};
+		IdentityOf::<T>::insert(&who_account, registration);
+		UsernameOf::<T>::insert(&who_account, &username);
+
+		#[extrinsic_call]
+		submit_personal_credential_evidence(origin as T::RuntimeOrigin, credential);
+
+		assert_has_event::<T>(Event::<T>::EvidenceSubmitted { alias }.into());
+		Ok(())
+	}
+
+	#[benchmark]
+	fn personal_credential_judged() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		let context = JudgementContext::truncate_from(alias.to_vec());
+		let credential = Social::Github {
+			username: username
+				.to_vec()
+				.try_into()
+				.expect("username len checked in integrity test; qed"),
+		};
+		let evidence: IdentityData = username
+			.into_inner()
+			.try_into()
+			.expect("username len checked in integrity test; qed");
+		let statement = Statement::IdentityCredential { platform: credential.clone(), evidence };
+		let callback = Callback::from_parts(Pallet::<T>::index() as u8, 26);
+		let id = T::Oracle::judge_statement(statement, context.clone(), callback)?;
+
+		PersonIdentities::<T>::insert(
+			alias,
+			PersonalIdentity {
+				account: who_account.clone(),
+				pending_judgements: alloc::vec![(credential.clone(), id.clone())]
+					.try_into()
+					.expect("must hold one element; qed"),
+				username_last_reported_at: None,
+				banned: false,
+			},
+		);
+		let registration = Registration {
+			judgements: alloc::vec![(RegistrarIndex::MAX, Judgement::External)].try_into().unwrap(),
+			deposit: 0u32.into(),
+			info: Default::default(),
+		};
+		IdentityOf::<T>::insert(&who_account, registration);
+		let judgement = OracleJudgement::Truth(Truth::True);
+
+		#[extrinsic_call]
+		personal_credential_judged(RawOrigin::Root, id, context, judgement);
+
+		assert_has_event::<T>(Event::<T>::CredentialAccepted { alias }.into());
+		Ok(())
+	}
+
+	#[benchmark]
+	fn clear_personal_identity() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		PersonIdentities::<T>::insert(
+			alias,
+			PersonalIdentity {
+				account: who_account.clone(),
+				pending_judgements: Default::default(),
+				username_last_reported_at: None,
+				banned: false,
+			},
+		);
+		let registration = Registration {
+			judgements: alloc::vec![(RegistrarIndex::MAX, Judgement::External)].try_into().unwrap(),
+			deposit: 0u32.into(),
+			info: Default::default(),
+		};
+		IdentityOf::<T>::insert(&who_account, registration);
+		AccountToAlias::<T>::insert(&who_account, alias);
+		UsernameOf::<T>::insert(&who_account, &username);
+		UsernameInfoOf::<T>::insert(
+			&username,
+			UsernameInformation { owner: who_account.clone(), provider: Provider::new_permanent() },
+		);
+		let removal_penalty: BalanceOf<T> = <T as Config>::CredentialRemovalPenalty::get();
+		T::Currency::make_free_balance_be(&who_account, removal_penalty);
+
+		#[extrinsic_call]
+		clear_personal_identity(origin as T::RuntimeOrigin);
+
+		assert_has_event::<T>(Event::<T>::PersonalIdentityCleared { alias }.into());
+		Ok(())
+	}
+
+	#[benchmark]
+	fn report_username() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		// Verify signature here to avoid surprise errors at runtime
+		assert!(signature.verify(&alias[..], &public.into()));
+
+		Identity::<T>::set_personal_identity(
+			origin as T::RuntimeOrigin,
+			who_account.clone(),
+			signature.into(),
+			username.clone(),
+		)?;
+
+		PersonIdentities::<T>::mutate(&alias, |identity| {
+			if let Some(id) = identity {
+				id.username_last_reported_at = Some(0u32.into());
+			}
+		});
+		frame_system::Pallet::<T>::set_block_number(T::UsernameReportTimeout::get() + 1u32.into());
+
+		let reporter: T::AccountId = account("reporter", 0, SEED);
+		let _ = T::Currency::make_free_balance_be(
+			&reporter,
+			T::Currency::minimum_balance() + T::UsernameReportDeposit::get(),
+		);
+
+		#[extrinsic_call]
+		_(RawOrigin::Signed(reporter.clone()), username.clone());
+
+		assert_has_event::<T>(Event::<T>::UsernameReported { reporter, username }.into());
+		Ok(())
+	}
+
+	#[benchmark]
+	fn reported_username_judged_true() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		// Verify signature here to avoid surprise errors at runtime
+		assert!(signature.verify(&alias[..], &public.into()));
+
+		Identity::<T>::set_personal_identity(
+			origin as T::RuntimeOrigin,
+			who_account.clone(),
+			signature.into(),
+			username.clone(),
+		)?;
+
+		PersonIdentities::<T>::mutate(&alias, |identity| {
+			if let Some(id) = identity {
+				id.username_last_reported_at = Some(0u32.into());
+			}
+		});
+
+		let reporter: T::AccountId = account("reporter", 0, SEED);
+		let _ = T::Currency::make_free_balance_be(
+			&reporter,
+			T::Currency::minimum_balance() + T::UsernameReportDeposit::get(),
+		);
+
+		let context = JudgementContext::truncate_from(alias.to_vec());
+		let statement_username: IdentityData = username
+			.clone()
+			.into_inner()
+			.try_into()
+			.expect("username len checked in integrity test; qed");
+		let statement = Statement::UsernameValid { username: statement_username };
+		let callback = Callback::from_parts(Pallet::<T>::index() as u8, 29);
+		let case_id = T::Oracle::judge_statement(statement, context.clone(), callback)?;
+
+		T::Currency::reserve(&reporter, T::UsernameReportDeposit::get())?;
+		let username_report = UsernameReport {
+			reporter: reporter.clone(),
+			username: username.clone(),
+			case_id: case_id.clone(),
+		};
+		PendingUsernameReports::<T>::insert(alias, username_report);
+		let judgement = OracleJudgement::Truth(Truth::True);
+
+		#[extrinsic_call]
+		reported_username_judged(RawOrigin::Root, case_id, context, judgement);
+
+		assert_has_event::<T>(Event::<T>::ReportedUsernameJudgedValid { username }.into());
+		Ok(())
+	}
+
+	#[benchmark]
+	fn reported_username_judged_false() -> Result<(), BenchmarkError> {
+		let username = Username::<T>::try_from(bench_username())
+			.expect("test usernames should fit within bounds");
+
+		let public = sr25519_generate(0.into(), None);
+		let who_account: T::AccountId = MultiSigner::Sr25519(public).into_account().into();
+
+		let origin = T::EnsurePerson::try_successful_origin(&IDENTITY_CONTEXT)
+			.map_err(|_| BenchmarkError::Weightless)?;
+		let Ok(alias) = T::EnsurePerson::try_origin(origin.clone(), &IDENTITY_CONTEXT) else {
+			panic!("origin was created with `try_successful_origin`; qed");
+		};
+
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		// Verify signature here to avoid surprise errors at runtime
+		assert!(signature.verify(&alias[..], &public.into()));
+
+		Identity::<T>::set_personal_identity(
+			origin as T::RuntimeOrigin,
+			who_account.clone(),
+			signature.into(),
+			username.clone(),
+		)?;
+
+		PersonIdentities::<T>::mutate(&alias, |identity| {
+			if let Some(id) = identity {
+				id.username_last_reported_at = Some(0u32.into());
+			}
+		});
+
+		let reporter: T::AccountId = account("reporter", 0, SEED);
+		let _ = T::Currency::make_free_balance_be(
+			&reporter,
+			T::Currency::minimum_balance() + T::UsernameReportDeposit::get(),
+		);
+
+		let context = JudgementContext::truncate_from(alias.to_vec());
+		let statement_username: IdentityData = username
+			.clone()
+			.into_inner()
+			.try_into()
+			.expect("username len checked in integrity test; qed");
+		let statement = Statement::UsernameValid { username: statement_username };
+		let callback = Callback::from_parts(Pallet::<T>::index() as u8, 29);
+		let case_id = T::Oracle::judge_statement(statement, context.clone(), callback)?;
+
+		T::Currency::reserve(&reporter, T::UsernameReportDeposit::get())?;
+		let username_report = UsernameReport {
+			reporter: reporter.clone(),
+			username: username.clone(),
+			case_id: case_id.clone(),
+		};
+		PendingUsernameReports::<T>::insert(alias, username_report);
+		let judgement = OracleJudgement::Truth(Truth::False);
+
+		#[extrinsic_call]
+		reported_username_judged(RawOrigin::Root, case_id, context, judgement);
+
+		assert_has_event::<T>(Event::<T>::ReportedUsernameJudgedInvalid { username }.into());
 		Ok(())
 	}
 

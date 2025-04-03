@@ -15,8 +15,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::*;
+extern crate alloc;
+
 use alloc::{vec, vec::Vec};
+
+use super::*;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::{fmt::Debug, iter::once, ops::Add};
 use frame_support::{
@@ -39,7 +43,7 @@ pub type RegistrarIndex = u32;
 /// than 32-bytes then it will be truncated when encoding.
 ///
 /// Can also be `None`.
-#[derive(Clone, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, MaxEncodedLen)]
+#[derive(Clone, Eq, PartialEq, RuntimeDebug, MaxEncodedLen, DecodeWithMemTracking)]
 pub enum Data {
 	/// No data here.
 	None,
@@ -93,7 +97,7 @@ impl Encode for Data {
 			Data::Raw(ref x) => {
 				let l = x.len().min(32);
 				let mut r = vec![l as u8 + 1; l + 1];
-				r[1..].copy_from_slice(&x[..l as usize]);
+				r[1..].copy_from_slice(&x[..l]);
 				r
 			},
 			Data::BlakeTwo256(ref h) => once(34u8).chain(h.iter().cloned()).collect(),
@@ -186,6 +190,12 @@ impl Default for Data {
 	}
 }
 
+impl From<IdentityData> for Data {
+	fn from(value: IdentityData) -> Self {
+		Self::Raw(value)
+	}
+}
+
 /// An attestation of a registrar over how accurate some `IdentityInfo` is in describing an account.
 ///
 /// NOTE: Registrars may pay little attention to some fields. Registrars may want to make clear
@@ -202,6 +212,7 @@ impl Default for Data {
 	MaxEncodedLen,
 	TypeInfo,
 )]
+#[allow(clippy::multiple_bound_locations)]
 pub enum Judgement<Balance: Encode + Decode + MaxEncodedLen + Copy + Clone + Debug + Eq + PartialEq>
 {
 	/// The default value; no opinion is held.
@@ -223,6 +234,8 @@ pub enum Judgement<Balance: Encode + Decode + MaxEncodedLen + Copy + Clone + Deb
 	/// The data is erroneous. This may be indicative of malicious intent. This cannot be removed
 	/// except by the registrar.
 	Erroneous,
+	/// External verification.
+	External,
 }
 
 impl<Balance: Encode + Decode + MaxEncodedLen + Copy + Clone + Debug + Eq + PartialEq>
@@ -238,7 +251,7 @@ impl<Balance: Encode + Decode + MaxEncodedLen + Copy + Clone + Debug + Eq + Part
 	/// of specialized handlers. Examples include "malicious" judgements and deposit-holding
 	/// judgements.
 	pub(crate) fn is_sticky(&self) -> bool {
-		matches!(self, Judgement::FeePaid(_) | Judgement::Erroneous)
+		matches!(self, Judgement::FeePaid(_) | Judgement::Erroneous | Judgement::External)
 	}
 }
 
@@ -251,6 +264,10 @@ pub trait IdentityInformationProvider:
 
 	/// Check if an identity registered information for some given `fields`.
 	fn has_identity(&self, fields: Self::FieldsIdentifier) -> bool;
+
+	/// Set a social. If the type doesn't support the social, it will be returned back to the caller
+	/// as an error.
+	fn set_social(&mut self, social: Social) -> Result<(), Social>;
 
 	/// Create a basic instance of the identity information.
 	#[cfg(feature = "runtime-benchmarks")]
@@ -346,33 +363,125 @@ pub struct AuthorityProperties<Account> {
 }
 
 /// A byte vec used to represent a username.
-pub(crate) type Username<T> = BoundedVec<u8, <T as Config>::MaxUsernameLength>;
+pub type Username<T> = BoundedVec<u8, <T as Config>::MaxUsernameLength>;
 
+/// Represents a pending username report by associating the reporter with the
+/// reported username and id of the case created within the oracle.
+#[derive(
+	CloneNoBound, Encode, Decode, Eq, MaxEncodedLen, PartialEqNoBound, TypeInfo, RuntimeDebugNoBound,
+)]
+#[codec(mel_bound())]
+pub struct UsernameReport<
+	AccountId: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+	Username: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+	Ticket: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+> {
+	/// The reporter's account.
+	pub reporter: AccountId,
+	/// The username being reported.
+	pub username: Username,
+	/// The case id, issued by the oracle after the case is opened.
+	pub case_id: Ticket,
+}
+
+/// The identity information of a person, recognized by a proof of personhood mechanism.
+#[derive(
+	CloneNoBound, Encode, Decode, Eq, MaxEncodedLen, PartialEqNoBound, RuntimeDebugNoBound, TypeInfo,
+)]
+#[codec(mel_bound())]
+#[scale_info(skip_type_params(MaxJudgements))]
+pub struct PersonalIdentity<
+	AccountId: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+	JudgementId: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+	MaxJudgements: Get<u32>,
+	BlockNumber: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo + Default,
+> {
+	/// The account associated with the person.
+	pub account: AccountId,
+	/// The social credentials that are currently under review and are awaiting judgement.
+	pub pending_judgements: BoundedVec<(Social, JudgementId), MaxJudgements>,
+	/// Flag to signal that the person is banned.
+	pub banned: bool,
+	/// Block at which the username of this identity was last reported at, or 0.
+	pub username_last_reported_at: Option<BlockNumber>,
+}
+
+impl<AccountId, JudgementId, MaxJudgements, BlockNumber>
+	PersonalIdentity<AccountId, JudgementId, MaxJudgements, BlockNumber>
+where
+	AccountId: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+	JudgementId: Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo,
+	MaxJudgements: Get<u32>,
+	BlockNumber:
+		Encode + Decode + MaxEncodedLen + Clone + Debug + Eq + PartialEq + TypeInfo + Default,
+{
+	/// Create a new personal identity.
+	pub fn new(account: AccountId) -> Self {
+		Self {
+			account,
+			pending_judgements: Default::default(),
+			banned: false,
+			username_last_reported_at: None,
+		}
+	}
+
+	/// Returns whether a case was already submitted and is awaiting judgement for a particular
+	/// social credential.
+	pub fn pending_social(&self, social: &Social) -> bool {
+		self.pending_judgements.iter().any(|(pending, _)| social.eq_platform(pending))
+	}
+
+	/// Returns the information related to social credential case, removing it from the list of
+	/// cases awaiting judgement.
+	pub fn take_pending(&mut self, ticket: JudgementId) -> Option<Social> {
+		let idx = self.pending_judgements.iter().position(|(_, id)| *id == ticket)?;
+		Some(self.pending_judgements.remove(idx).0)
+	}
+
+	/// Add a new social credential case to the list of cases awaiting judgement.
+	pub fn submit(
+		&mut self,
+		social: Social,
+		ticket: JudgementId,
+	) -> Result<(), (Social, JudgementId)> {
+		self.pending_judgements.try_push((social, ticket))
+	}
+}
+
+/// The provider for the existence of a username.
 #[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, PartialEq, Debug)]
 pub enum Provider<Balance> {
+	/// The username was created by an authority using its governance allocation.
 	Allocation,
+	/// The username was created by an authority placing a deposit.
 	AuthorityDeposit(Balance),
+	/// The username was created by the system.
 	System,
 }
 
 impl<Balance> Provider<Balance> {
+	/// Create a new provider for usernames granted through allocation.
 	pub fn new_with_allocation() -> Self {
 		Self::Allocation
 	}
 
+	/// Create a new provider for usernames created through an authority's deposit.
 	pub fn new_with_deposit(deposit: Balance) -> Self {
 		Self::AuthorityDeposit(deposit)
 	}
 
-	#[allow(unused)]
+	/// Create a new provider for usernames created by the system.
 	pub fn new_permanent() -> Self {
 		Self::System
 	}
 }
 
+/// Information about a username's owner and existence.
 #[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, PartialEq, Debug)]
 pub struct UsernameInformation<Account, Balance> {
+	/// The account owning the username, and its immediate association.
 	pub owner: Account,
+	/// The provider for the username.
 	pub provider: Provider<Balance>,
 }
 
@@ -401,7 +510,7 @@ mod tests {
 					.variants
 					.iter()
 					.find(|v| v.name == variant_name)
-					.expect(&format!("Expected to find variant {}", variant_name));
+					.unwrap_or_else(|| panic!("Expected to find variant {}", variant_name));
 
 				let field_arr_len = variant
 					.fields

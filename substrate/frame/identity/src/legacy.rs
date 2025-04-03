@@ -15,13 +15,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "runtime-benchmarks")]
-use alloc::vec;
+extern crate alloc;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 #[cfg(feature = "runtime-benchmarks")]
 use enumflags2::BitFlag;
 use enumflags2::{bitflags, BitFlags};
-use frame_support::{traits::Get, CloneNoBound, EqNoBound, PartialEqNoBound, RuntimeDebugNoBound};
+use frame_support::{
+	traits::{reality::identity::Social, Get},
+	CloneNoBound, EqNoBound, PartialEqNoBound, RuntimeDebugNoBound,
+};
 use scale_info::{build::Variants, Path, Type, TypeInfo};
 use sp_runtime::{BoundedVec, RuntimeDebug};
 
@@ -131,14 +134,34 @@ impl<FieldLimit: Get<u32> + 'static> IdentityInformationProvider for IdentityInf
 		self.fields().bits() & fields == fields
 	}
 
+	fn set_social(&mut self, social: Social) -> Result<(), Social> {
+		match social {
+			Social::Twitter { username } => self.twitter = Data::Raw(username),
+			Social::Github { username } => {
+				if self
+					.additional
+					.try_push((
+						Data::Raw(b"Github".to_vec().try_into().unwrap()),
+						Data::Raw(username.clone()),
+					))
+					.is_err()
+				{
+					return Err(Social::Github { username });
+				}
+			},
+		}
+		Ok(())
+	}
+
 	#[cfg(feature = "runtime-benchmarks")]
 	fn create_identity_info() -> Self {
-		let data = Data::Raw(vec![0; 32].try_into().unwrap());
+		let data = Data::Raw(alloc::vec![0; 32].try_into().unwrap());
 
 		IdentityInfo {
-			additional: vec![(data.clone(), data.clone()); FieldLimit::get().try_into().unwrap()]
-				.try_into()
-				.unwrap(),
+			additional:
+				alloc::vec![(data.clone(), data.clone()); FieldLimit::get().try_into().unwrap()]
+					.try_into()
+					.unwrap(),
 			display: data.clone(),
 			legal: data.clone(),
 			web: data.clone(),
