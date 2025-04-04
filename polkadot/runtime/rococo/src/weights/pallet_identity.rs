@@ -485,6 +485,27 @@ impl<T: frame_system::Config> pallet_identity::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().reads(5))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}
+	fn set_personal_identity() -> Weight {
+		Weight::zero()
+	}
+	fn submit_personal_credential_evidence() -> Weight {
+		Weight::zero()
+	}
+	fn personal_credential_judged() -> Weight {
+		Weight::zero()
+	}
+	fn clear_personal_identity() -> Weight {
+		Weight::zero()
+	}
+	fn report_username() -> Weight {
+		Weight::zero()
+	}
+	fn reported_username_judged_false() -> Weight {
+		Weight::zero()
+	}
+	fn reported_username_judged_true() -> Weight {
+		Weight::zero()
+	}
 	/// Storage: UNKNOWN KEY `0x2aeddc77fe58c98d50bd37f1b90840f99622d1423cdd16f5c33e2b531c34a53d` (r:2 w:0)
 	/// Proof: UNKNOWN KEY `0x2aeddc77fe58c98d50bd37f1b90840f99622d1423cdd16f5c33e2b531c34a53d` (r:2 w:0)
 	/// Storage: `Identity::AuthorityOf` (r:0 w:1)

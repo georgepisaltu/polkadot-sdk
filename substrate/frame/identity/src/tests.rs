@@ -26,14 +26,19 @@ use crate::{
 use codec::{Decode, Encode};
 use frame_support::{
 	assert_err, assert_noop, assert_ok, derive_impl, parameter_types,
-	traits::{ConstU32, ConstU64, Get},
+	traits::{
+		fungible::Mutate,
+		reality::{identity::Social, Alias, Data as PersonalData},
+		ConstU32, ConstU64, Get, OnFinalize, OnInitialize, TryMapSuccess,
+	},
 	BoundedVec,
 };
-use frame_system::EnsureRoot;
+use frame_system::{EnsureRoot, EnsureSigned};
 use sp_core::H256;
 use sp_io::crypto::{sr25519_generate, sr25519_sign};
 use sp_keystore::{testing::MemoryKeystore, KeystoreExt};
 use sp_runtime::{
+	morph_types,
 	traits::{BadOrigin, BlakeTwo256, IdentifyAccount, IdentityLookup, Verify},
 	BuildStorage, MultiSignature, MultiSigner,
 };
@@ -47,28 +52,132 @@ type Block = frame_system::mocking::MockBlock<Test>;
 frame_support::construct_runtime!(
 	pub enum Test
 	{
-		System: frame_system,
-		Balances: pallet_balances,
-		Identity: pallet_identity,
+		System: frame_system::{Pallet, Call, Config<T>, Storage, Event<T>},
+		Balances: pallet_balances::{Pallet, Call, Storage, Config<T>, Event<T>},
+		Identity: pallet_identity::{Pallet, Call, Storage, Event<T>},
+		Oracle: simple_oracle,
 	}
 );
 
 #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
 impl frame_system::Config for Test {
+	type BaseCallFilter = frame_support::traits::Everything;
+	type BlockWeights = ();
+	type BlockLength = ();
+	type RuntimeOrigin = RuntimeOrigin;
+	type Nonce = u64;
+	type Hash = H256;
+	type RuntimeCall = RuntimeCall;
+	type Hashing = BlakeTwo256;
 	type AccountId = AccountId;
 	type Lookup = IdentityLookup<Self::AccountId>;
 	type Block = Block;
+	type RuntimeEvent = RuntimeEvent;
+	type BlockHashCount = ConstU64<250>;
+	type DbWeight = ();
+	type Version = ();
+	type PalletInfo = PalletInfo;
 	type AccountData = pallet_balances::AccountData<u64>;
+	type OnNewAccount = ();
+	type OnKilledAccount = ();
+	type SystemWeightInfo = ();
+	type SS58Prefix = ();
+	type OnSetCode = ();
+	type MaxConsumers = ConstU32<16>;
 }
 
-#[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
 impl pallet_balances::Config for Test {
+	type Balance = u64;
+	type RuntimeEvent = RuntimeEvent;
+	type DustRemoval = ();
+	type ExistentialDeposit = ConstU64<1>;
 	type AccountStore = System;
+	type MaxLocks = ();
+	type MaxReserves = ();
+	type ReserveIdentifier = [u8; 8];
+	type WeightInfo = ();
+	type FreezeIdentifier = ();
+	type MaxFreezes = ();
+	type RuntimeHoldReason = ();
+	type RuntimeFreezeReason = ();
+	type DoneSlashHandler = ();
+}
+
+#[frame_support::pallet]
+pub mod simple_oracle {
+	use codec::Decode;
+	use frame_support::{
+		Blake2_128Concat,
+		__private::Get,
+		pallet_prelude::{Hooks, OptionQuery, StorageMap},
+		traits::reality::{
+			Alias, Callback, Judgement, JudgementContext, Statement, StatementOracle,
+		},
+	};
+	use frame_system::pallet_prelude::BlockNumberFor;
+	use sp_runtime::DispatchError;
+
+	#[pallet::pallet]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	pub trait Config: frame_system::Config {
+		#[pallet::constant]
+		type MaxStatementsToJudge: Get<u32>;
+	}
+
+	#[pallet::storage]
+	pub type StatementsToJudge<T: Config> =
+		StorageMap<_, Blake2_128Concat, Alias, Statement, OptionQuery>;
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {}
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
+
+	impl<T: Config> StatementOracle<T::RuntimeCall> for Pallet<T> {
+		type Ticket = Alias;
+
+		fn judge_statement(
+			statement: Statement,
+			ctx: JudgementContext,
+			_: Callback<(Self::Ticket, JudgementContext, Judgement), T::RuntimeCall>,
+		) -> Result<Self::Ticket, DispatchError> {
+			let alias = Alias::decode(&mut &ctx[..]).unwrap();
+			StatementsToJudge::<T>::insert(alias, statement);
+			Ok(alias)
+		}
+	}
+}
+
+impl simple_oracle::Config for Test {
+	type MaxStatementsToJudge = ConstU32<20>;
+}
+
+pub struct MockOracle;
+impl StatementOracle<RuntimeCall> for MockOracle {
+	type Ticket = Alias;
+
+	fn judge_statement(
+		_: Statement,
+		ctx: JudgementContext,
+		_: Callback<(Self::Ticket, JudgementContext, OracleJudgement), RuntimeCall>,
+	) -> Result<Self::Ticket, DispatchError> {
+		let alias = Alias::decode(&mut &ctx[..]).unwrap();
+		Ok(alias)
+	}
 }
 
 parameter_types! {
 	pub const MaxAdditionalFields: u32 = 2;
 	pub const MaxRegistrars: u32 = 20;
+}
+
+morph_types! {
+	pub type IdenticalAlias: TryMorph = |r: AccountId| -> Result<Alias, ()> {
+		Ok([<sp_runtime::AccountId32 as AsRef<[u8]>>::as_ref(&r)[0]; 32])
+	};
 }
 
 impl pallet_identity::Config for Test {
@@ -78,6 +187,7 @@ impl pallet_identity::Config for Test {
 	type BasicDeposit = ConstU64<100>;
 	type ByteDeposit = ConstU64<10>;
 	type UsernameDeposit = ConstU64<10>;
+	type UsernameReportDeposit = ConstU64<5>;
 	type SubAccountDeposit = ConstU64<100>;
 	type MaxSubAccounts = ConstU32<2>;
 	type IdentityInformation = IdentityInfo<MaxAdditionalFields>;
@@ -91,7 +201,13 @@ impl pallet_identity::Config for Test {
 	type UsernameGracePeriod = ConstU64<2>;
 	type MaxSuffixLength = ConstU32<7>;
 	type MaxUsernameLength = ConstU32<32>;
+	type MaxJudgements = ConstU32<3>;
+	type MinUsernameLength = ConstU32<2>;
+	type Oracle = simple_oracle::Pallet<Test>;
+	type EnsurePerson = TryMapSuccess<EnsureSigned<AccountId>, IdenticalAlias>;
+	type CredentialRemovalPenalty = ConstU64<100>;
 	type WeightInfo = ();
+	type UsernameReportTimeout = ConstU64<5>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -113,6 +229,18 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 	ext.register_extension(KeystoreExt::new(MemoryKeystore::new()));
 	ext.execute_with(|| System::set_block_number(1));
 	ext
+}
+
+fn run_to_block(n: u64) {
+	while System::block_number() < n {
+		Identity::on_finalize(System::block_number());
+		Balances::on_finalize(System::block_number());
+		System::on_finalize(System::block_number());
+		System::set_block_number(System::block_number() + 1);
+		System::on_initialize(System::block_number());
+		Balances::on_initialize(System::block_number());
+		Identity::on_initialize(System::block_number());
+	}
 }
 
 fn account(id: u8) -> AccountIdOf<Test> {
@@ -159,10 +287,7 @@ fn test_username_of(int: Vec<u8>, suffix: Vec<u8>) -> Username<Test> {
 	bounded_username.extend(username);
 	bounded_username.extend(b".");
 	bounded_username.extend(suffix);
-	let bounded_username = Username::<Test>::try_from(bounded_username)
-		.expect("test usernames should fit within bounds");
-
-	bounded_username
+	Username::<Test>::try_from(bounded_username).expect("test usernames should fit within bounds")
 }
 
 fn infoof_ten() -> IdentityInfo<MaxAdditionalFields> {
@@ -186,6 +311,17 @@ fn id_deposit(id: &IdentityInfo<MaxAdditionalFields>) -> u64 {
 	let byte_deposit: u64 = <<Test as Config>::ByteDeposit as Get<u64>>::get() *
 		TryInto::<u64>::try_into(id.encoded_size()).unwrap();
 	base_deposit + byte_deposit
+}
+
+fn personal_identity_registration(
+) -> Registration<u64, MaxRegistrars, IdentityInfo<MaxAdditionalFields>> {
+	Registration {
+		judgements: alloc::vec![(RegistrarIndex::MAX, Judgement::External)]
+			.try_into()
+			.expect("judgements must be able to hold at least one element; qed"),
+		deposit: 0u32.into(),
+		info: IdentityInfo::default(),
+	}
 }
 
 #[test]
@@ -1006,6 +1142,72 @@ fn adding_and_removing_authorities_should_work() {
 }
 
 #[test]
+fn username_minimum_limit_work() {
+	new_test_ext().execute_with(|| {
+		// set up authority
+		let initial_authority_balance = 1000;
+		let [authority, _] = unfunded_accounts();
+		Balances::make_free_balance_be(&authority, initial_authority_balance);
+		let short_suffix: Vec<u8> = b"a".to_vec();
+		let allocation: u32 = 10;
+		assert_noop!(
+			Identity::add_username_authority(
+				RuntimeOrigin::root(),
+				authority.clone(),
+				short_suffix.clone(),
+				allocation
+			),
+			Error::<Test>::InvalidSuffix
+		);
+
+		let suffix: Vec<u8> = b"ab".to_vec();
+		let allocation: u32 = 10;
+		assert_ok!(Identity::add_username_authority(
+			RuntimeOrigin::root(),
+			authority.clone(),
+			suffix.clone(),
+			allocation
+		));
+
+		// set up account
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+
+		// set up short username
+		let short_username: Username<Test> = b"a.ab".to_vec().try_into().unwrap();
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &short_username[..]).unwrap());
+
+		assert_noop!(
+			Identity::set_username_for(
+				RuntimeOrigin::signed(authority.clone()),
+				who_account.clone(),
+				short_username.clone().into(),
+				Some(signature),
+				true,
+			),
+			Error::<Test>::InvalidUsername
+		);
+
+		// set up username
+		let username: Username<Test> = b"ab.ab".to_vec().try_into().unwrap();
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
+
+		assert_ok!(Identity::set_username_for(
+			RuntimeOrigin::signed(authority.clone()),
+			who_account.clone(),
+			username.clone().into(),
+			Some(signature),
+			true,
+		));
+
+		// username was registered
+		assert_eq!(UsernameOf::<Test>::get(&who_account), Some(username.clone()));
+	});
+}
+
+#[test]
 fn set_username_with_signature_without_existing_identity_should_work() {
 	new_test_ext().execute_with(|| {
 		// set up authority
@@ -1026,7 +1228,7 @@ fn set_username_with_signature_without_existing_identity_should_work() {
 
 		// set up user and sign message
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
 
@@ -1052,7 +1254,7 @@ fn set_username_with_signature_without_existing_identity_should_work() {
 		assert_eq!(Balances::free_balance(&authority), initial_authority_balance);
 		// But the allocation decreased.
 		assert_eq!(
-			AuthorityOf::<Test>::get(&Identity::suffix_of_username(&username).unwrap())
+			AuthorityOf::<Test>::get(Identity::suffix_of_username(&username).unwrap())
 				.unwrap()
 				.allocation,
 			9
@@ -1065,7 +1267,7 @@ fn set_username_with_signature_without_existing_identity_should_work() {
 
 		// set up user and sign message
 		let public = sr25519_generate(1.into(), None);
-		let second_who: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let second_who: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(1.into(), &public, &second_username[..]).unwrap());
 		// don't use the allocation this time
@@ -1096,7 +1298,7 @@ fn set_username_with_signature_without_existing_identity_should_work() {
 		);
 		// But the allocation was preserved.
 		assert_eq!(
-			AuthorityOf::<Test>::get(&Identity::suffix_of_username(&second_username).unwrap())
+			AuthorityOf::<Test>::get(Identity::suffix_of_username(&second_username).unwrap())
 				.unwrap()
 				.allocation,
 			9
@@ -1123,7 +1325,7 @@ fn set_username_with_signature_with_existing_identity_should_work() {
 
 		// set up user and sign message
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
 
@@ -1173,7 +1375,7 @@ fn set_username_through_deposit_with_existing_identity_should_work() {
 
 		// set up user and sign message
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
 
@@ -1235,7 +1437,7 @@ fn set_username_with_bytes_signature_should_work() {
 
 		// set up user
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 
 		// set up username
 		let username = test_username_of(b"42".to_vec(), suffix);
@@ -1248,7 +1450,7 @@ fn set_username_with_bytes_signature_should_work() {
 
 		// Trivial
 		assert_ok!(Identity::validate_signature(
-			&unwrapped_username,
+			&unwrapped_username[..],
 			&signature_on_unwrapped,
 			&who_account
 		));
@@ -1260,15 +1462,16 @@ fn set_username_with_bytes_signature_should_work() {
 		let mut wrapped_username: Vec<u8> =
 			Vec::with_capacity(unwrapped_username.len() + prehtml.len() + posthtml.len());
 		wrapped_username.extend(prehtml);
-		wrapped_username.extend(&unwrapped_username);
+		wrapped_username.extend(unwrapped_username.clone());
 		wrapped_username.extend(posthtml);
-		let signature_on_wrapped =
-			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &wrapped_username).unwrap());
+		let signature_on_wrapped = MultiSignature::Sr25519(
+			sr25519_sign(0.into(), &public, &wrapped_username[..]).unwrap(),
+		);
 
 		// We want to call `validate_signature` on the *unwrapped* username, but the signature on
 		// the *wrapped* data.
 		assert_ok!(Identity::validate_signature(
-			&unwrapped_username,
+			&unwrapped_username[..],
 			&signature_on_wrapped,
 			&who_account
 		));
@@ -1526,7 +1729,7 @@ fn setting_primary_should_work() {
 
 		// set up user
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 
 		// set up username
 		let first_username = test_username_of(b"42".to_vec(), suffix.clone());
@@ -1608,7 +1811,7 @@ fn must_own_primary() {
 
 		// Set up first user ("pi") and a username.
 		let pi_public = sr25519_generate(0.into(), None);
-		let pi_account: AccountIdOf<Test> = MultiSigner::Sr25519(pi_public).into_account().into();
+		let pi_account: AccountIdOf<Test> = MultiSigner::Sr25519(pi_public).into_account();
 		let pi_username = test_username_of(b"username314159".to_vec(), suffix.clone());
 		let pi_signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &pi_public, &pi_username[..]).unwrap());
@@ -1622,7 +1825,7 @@ fn must_own_primary() {
 
 		// Set up second user ("e") and a username.
 		let e_public = sr25519_generate(1.into(), None);
-		let e_account: AccountIdOf<Test> = MultiSigner::Sr25519(e_public).into_account().into();
+		let e_account: AccountIdOf<Test> = MultiSigner::Sr25519(e_public).into_account();
 		let e_username = test_username_of(b"username271828".to_vec(), suffix.clone());
 		let e_signature =
 			MultiSignature::Sr25519(sr25519_sign(1.into(), &e_public, &e_username[..]).unwrap());
@@ -1703,7 +1906,7 @@ fn unaccepted_usernames_through_grant_should_expire() {
 			Some((who.clone(), expiration, Provider::Allocation))
 		);
 
-		System::run_to_block::<AllPalletsWithSystem>(now + expiration - 1);
+		run_to_block(now + expiration - 1);
 
 		// Cannot be removed
 		assert_noop!(
@@ -1711,7 +1914,7 @@ fn unaccepted_usernames_through_grant_should_expire() {
 			Error::<Test>::NotExpired
 		);
 
-		System::run_to_block::<AllPalletsWithSystem>(now + expiration);
+		run_to_block(now + expiration);
 
 		// Anyone can remove
 		assert_ok!(Identity::remove_expired_approval(
@@ -1771,7 +1974,7 @@ fn unaccepted_usernames_through_deposit_should_expire() {
 			Some((who.clone(), expiration, Provider::AuthorityDeposit(username_deposit)))
 		);
 
-		System::run_to_block::<AllPalletsWithSystem>(now + expiration - 1);
+		run_to_block(now + expiration - 1);
 
 		// Cannot be removed
 		assert_noop!(
@@ -1779,7 +1982,7 @@ fn unaccepted_usernames_through_deposit_should_expire() {
 			Error::<Test>::NotExpired
 		);
 
-		System::run_to_block::<AllPalletsWithSystem>(now + expiration);
+		run_to_block(now + expiration);
 
 		// Anyone can remove
 		assert_eq!(
@@ -1834,7 +2037,7 @@ fn kill_username_should_work() {
 
 		// set up user and sign message
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
 
@@ -1930,7 +2133,7 @@ fn kill_username_should_work() {
 		));
 
 		// Kill the second username.
-		assert_ok!(Identity::kill_username(RuntimeOrigin::root(), username_two.clone().into()));
+		assert_ok!(Identity::kill_username(RuntimeOrigin::root(), username_two.clone()));
 
 		// The reverse lookup of the primary is gone.
 		assert!(UsernameInfoOf::<Test>::get::<&Username<Test>>(&username_two).is_none());
@@ -1948,7 +2151,7 @@ fn kill_username_should_work() {
 		assert!(UsernameInfoOf::<Test>::contains_key(&username_three));
 
 		// Kill the first, primary username.
-		assert_ok!(Identity::kill_username(RuntimeOrigin::root(), username.clone().into()));
+		assert_ok!(Identity::kill_username(RuntimeOrigin::root(), username.clone()));
 
 		// The reverse lookup of the primary is gone.
 		assert!(UsernameInfoOf::<Test>::get::<&Username<Test>>(&username).is_none());
@@ -1965,7 +2168,7 @@ fn kill_username_should_work() {
 		);
 
 		// Kill the third and last username.
-		assert_ok!(Identity::kill_username(RuntimeOrigin::root(), username_three.clone().into()));
+		assert_ok!(Identity::kill_username(RuntimeOrigin::root(), username_three.clone()));
 		// Everything is gone.
 		assert!(!UsernameInfoOf::<Test>::contains_key(&username_three));
 	});
@@ -1994,7 +2197,7 @@ fn unbind_and_remove_username_should_work() {
 
 		// Set up user and sign message.
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
 
@@ -2191,7 +2394,7 @@ fn unbind_dangling_username_defensive_should_panic() {
 
 		// Set up user and sign message.
 		let public = sr25519_generate(0.into(), None);
-		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account().into();
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
 		let signature =
 			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &username[..]).unwrap());
 
@@ -2234,4 +2437,910 @@ fn unbind_dangling_username_defensive_should_panic() {
 			Error::<Test>::NoUsername
 		);
 	});
+}
+
+#[test]
+fn set_personal_identity_works() {
+	new_test_ext().execute_with(|| {
+		// set up username
+		let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+		// set up user and sign message
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		assert_ok!(Identity::set_personal_identity(
+			RuntimeOrigin::signed(who_account.clone()),
+			who_account.clone(),
+			signature.clone(),
+			username.clone(),
+		));
+
+		assert_eq!(UsernameOf::<Test>::get(&who_account), Some(username.clone()));
+		let expected_user_info =
+			UsernameInformation { owner: who_account.clone(), provider: Provider::System };
+		assert_eq!(
+			UsernameInfoOf::<Test>::get::<&Username<Test>>(&username),
+			Some(expected_user_info)
+		);
+		let registration = personal_identity_registration();
+		assert_eq!(IdentityOf::<Test>::get(&who_account), Some(registration));
+		let personal_metadata = PersonalIdentity::new(who_account.clone());
+		assert_eq!(PersonIdentities::<Test>::get(alias), Some(personal_metadata));
+		assert_eq!(AccountToAlias::<Test>::get(&who_account), Some(alias));
+		// No balance was reserved.
+		assert!(Balances::free_balance(&who_account).is_zero());
+	});
+}
+
+#[test]
+fn set_personal_identity_with_existing_entry_fails() {
+	new_test_ext().execute_with(|| {
+		// set up username
+		let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+		// set up user and sign message
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		IdentityOf::<Test>::insert(&who_account, personal_identity_registration());
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			),
+			Error::<Test>::AlreadyRegistered
+		);
+		IdentityOf::<Test>::take(&who_account);
+
+		PersonIdentities::<Test>::insert(alias, PersonalIdentity::new(who_account.clone()));
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			),
+			Error::<Test>::AlreadyRegistered
+		);
+		PersonIdentities::<Test>::take(alias);
+
+		UsernameOf::<Test>::insert(&who_account, &username);
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			),
+			Error::<Test>::AlreadyRegistered
+		);
+		UsernameOf::<Test>::take(&who_account);
+
+		let username_info =
+			UsernameInformation { owner: who_account.clone(), provider: Provider::new_permanent() };
+		UsernameInfoOf::<Test>::insert(&username, username_info);
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			),
+			Error::<Test>::AlreadyRegistered
+		);
+		UsernameInfoOf::<Test>::take(&username);
+
+		AccountToAlias::<Test>::insert(&who_account, alias);
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			),
+			Error::<Test>::AlreadyRegistered
+		);
+		AccountToAlias::<Test>::take(&who_account);
+	});
+}
+
+#[test]
+fn set_personal_identity_invalid_username() {
+	new_test_ext().execute_with(|| {
+		// set up user and sign message
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		let username_with_suffix: Username<Test> = b"42.dot".to_vec().try_into().unwrap();
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username_with_suffix,
+			),
+			Error::<Test>::InvalidUsername
+		);
+
+		let username_with_uppercase: Username<Test> = b"DOT42".to_vec().try_into().unwrap();
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username_with_uppercase,
+			),
+			Error::<Test>::InvalidUsername
+		);
+
+		let empty_username: Username<Test> = b"".to_vec().try_into().unwrap();
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account,
+				signature,
+				empty_username,
+			),
+			Error::<Test>::InvalidUsername
+		);
+	});
+}
+
+#[test]
+fn set_personal_identity_invalid_signature() {
+	new_test_ext().execute_with(|| {
+		// set up username
+		let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+		// set up user and sign message
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, b"bogus payload").unwrap());
+
+		assert_noop!(
+			Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account,
+				signature,
+				username,
+			),
+			Error::<Test>::InvalidSignature
+		);
+	});
+}
+
+#[test]
+fn judge_personal_evidence_works() {
+	new_test_ext().execute_with(|| {
+		// set up username
+		let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+		// set up user and sign message
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		assert_ok!(Identity::set_personal_identity(
+			RuntimeOrigin::signed(who_account.clone()),
+			who_account.clone(),
+			signature.clone(),
+			username.clone(),
+		));
+
+		let gh_credential = Social::Github { username: b"github".to_vec().try_into().unwrap() };
+		assert_ok!(Identity::submit_personal_credential_evidence(
+			RuntimeOrigin::signed(who_account.clone()),
+			gh_credential.clone()
+		));
+
+		let expected_pending_judgements: BoundedVec<(Social, OracleTicketOf<Test>), MaxRegistrars> =
+			vec![(gh_credential.clone(), alias)].try_into().unwrap();
+		assert_eq!(
+			PersonIdentities::<Test>::get(alias).unwrap().pending_judgements,
+			expected_pending_judgements
+		);
+
+		let tw_credential = Social::Twitter { username: b"twitter".to_vec().try_into().unwrap() };
+		assert_ok!(Identity::submit_personal_credential_evidence(
+			RuntimeOrigin::signed(who_account.clone()),
+			tw_credential.clone()
+		));
+
+		let expected_pending_judgements: BoundedVec<(Social, OracleTicketOf<Test>), MaxRegistrars> =
+			vec![(gh_credential, alias), (tw_credential.clone(), alias)].try_into().unwrap();
+		assert_eq!(
+			PersonIdentities::<Test>::get(alias).unwrap().pending_judgements,
+			expected_pending_judgements
+		);
+		assert_eq!(IdentityOf::<Test>::get(&who_account).unwrap().info, IdentityInfo::default());
+
+		let mut ctx: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+		(ctx[..32]).copy_from_slice(&alias[..]);
+		assert_ok!(Identity::personal_credential_judged(
+			RuntimeOrigin::root(),
+			alias,
+			ctx.clone(),
+			OracleJudgement::Truth(Truth::True)
+		));
+		let expected_pending_judgements: BoundedVec<(Social, OracleTicketOf<Test>), MaxRegistrars> =
+			vec![(tw_credential, alias)].try_into().unwrap();
+		assert_eq!(
+			PersonIdentities::<Test>::get(alias).unwrap().pending_judgements,
+			expected_pending_judgements
+		);
+		assert!(IdentityOf::<Test>::get(&who_account).unwrap().info.additional.iter().any(
+			|(platform, user)| {
+				if let (Data::Raw(platform), Data::Raw(user)) = (platform, user) {
+					&platform[..] == b"Github" && &user[..] == b"github"
+				} else {
+					false
+				}
+			}
+		));
+
+		assert_ok!(Identity::personal_credential_judged(
+			RuntimeOrigin::root(),
+			alias,
+			ctx.clone(),
+			OracleJudgement::Truth(Truth::True)
+		));
+		assert!(PersonIdentities::<Test>::get(alias).unwrap().pending_judgements.is_empty());
+		let mut expected_info = IdentityInfo {
+			twitter: Data::Raw(b"twitter".to_vec().try_into().unwrap()),
+			..Default::default()
+		};
+		expected_info
+			.additional
+			.try_push((
+				Data::Raw(b"Github".to_vec().try_into().unwrap()),
+				Data::Raw(b"github".to_vec().try_into().unwrap()),
+			))
+			.unwrap();
+		assert_eq!(IdentityOf::<Test>::get(&who_account).unwrap().info, expected_info);
+	});
+}
+
+#[test]
+fn judged_callback_works() {
+	new_test_ext().execute_with(|| {
+		// set up user
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+
+		let mut ctx: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+		(ctx[..32]).copy_from_slice(&alias[..]);
+		assert_noop!(
+			Identity::personal_credential_judged(
+				RuntimeOrigin::root(),
+				alias,
+				ctx.clone(),
+				OracleJudgement::Truth(Truth::True)
+			),
+			Error::<Test>::NotFound
+		);
+
+		PersonIdentities::<Test>::insert(
+			alias,
+			PersonalIdentity {
+				account: who_account.clone(),
+				pending_judgements: Default::default(),
+				banned: false,
+				username_last_reported_at: None,
+			},
+		);
+
+		assert_noop!(
+			Identity::personal_credential_judged(
+				RuntimeOrigin::root(),
+				alias,
+				ctx.clone(),
+				OracleJudgement::Truth(Truth::True)
+			),
+			Error::<Test>::UnexpectedJudgement
+		);
+
+		let gh_credential = Social::Github { username: b"github".to_vec().try_into().unwrap() };
+		PersonIdentities::<Test>::mutate(alias, |maybe_id| {
+			let id = maybe_id.as_mut().unwrap();
+			id.pending_judgements.try_push((gh_credential, alias)).unwrap();
+		});
+
+		assert_noop!(
+			Identity::personal_credential_judged(
+				RuntimeOrigin::root(),
+				alias,
+				ctx.clone(),
+				OracleJudgement::Truth(Truth::True)
+			),
+			Error::<Test>::NoIdentity
+		);
+
+		IdentityOf::<Test>::insert(
+			&who_account,
+			Registration {
+				judgements: vec![(RegistrarIndex::MAX, Judgement::External)].try_into().unwrap(),
+				deposit: 0u32.into(),
+				info: Default::default(),
+			},
+		);
+
+		assert_ok!(Identity::personal_credential_judged(
+			RuntimeOrigin::root(),
+			alias,
+			ctx,
+			OracleJudgement::Truth(Truth::True)
+		));
+	});
+}
+
+#[test]
+fn clear_personal_evidence_works() {
+	new_test_ext().execute_with(|| {
+		// set up username
+		let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+		// set up user
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::NotFound
+		);
+
+		PersonIdentities::<Test>::insert(
+			alias,
+			PersonalIdentity {
+				account: who_account.clone(),
+				pending_judgements: Default::default(),
+				banned: false,
+				username_last_reported_at: None,
+			},
+		);
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::NotFound
+		);
+
+		AccountToAlias::<Test>::insert(&who_account, alias);
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::NoIdentity
+		);
+
+		IdentityOf::<Test>::insert(
+			&who_account,
+			Registration {
+				judgements: vec![(RegistrarIndex::MAX, Judgement::External)].try_into().unwrap(),
+				deposit: 0u32.into(),
+				info: Default::default(),
+			},
+		);
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::NoUsername
+		);
+
+		UsernameOf::<Test>::insert(&who_account, &username);
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::NoUsername
+		);
+
+		UsernameInfoOf::<Test>::insert(
+			&username,
+			UsernameInformation {
+				owner: who_account.clone(),
+				provider: Provider::new_with_allocation(),
+			},
+		);
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::InvalidUsername
+		);
+
+		UsernameInfoOf::<Test>::insert(
+			&username,
+			UsernameInformation { owner: who_account.clone(), provider: Provider::new_permanent() },
+		);
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			pallet_balances::Error::<Test>::InsufficientBalance
+		);
+
+		let removal_penalty: <Test as pallet_balances::Config>::Balance =
+			<Test as pallet_identity::Config>::CredentialRemovalPenalty::get();
+		Balances::make_free_balance_be(&who_account, removal_penalty.saturating_sub(1));
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			pallet_balances::Error::<Test>::InsufficientBalance
+		);
+
+		Balances::make_free_balance_be(&who_account, removal_penalty);
+		assert_ok!(Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())));
+
+		assert!(!PersonIdentities::<Test>::contains_key(alias));
+		assert!(!AccountToAlias::<Test>::contains_key(&who_account));
+		assert!(!IdentityOf::<Test>::contains_key(&who_account));
+		assert!(!UsernameOf::<Test>::contains_key(&who_account));
+		assert!(!UsernameInfoOf::<Test>::contains_key(&username));
+	});
+}
+
+#[test]
+fn clear_personal_identity_fails_if_username_was_reported() {
+	new_test_ext().execute_with(|| {
+		// Person A with a username exists
+		let (who_account, alias, username) = prepare_personal_identity();
+
+		// Person B needs some funds to be able to report
+		assert_ok!(Balances::mint_into(&account(12), 10));
+		// Person A needs some funds to be able to clear their identity
+		assert_ok!(Balances::mint_into(&who_account, 10000));
+
+		// Just to move in time a little
+		run_to_block(12);
+
+		// Person B reports the username of person A
+		assert_ok!(Identity::report_username(RuntimeOrigin::signed(account(12)), username.clone()));
+
+		// After seeing that a judgement is ongoing on their username,
+		// the person A tries to clear their identity but the attempt fails
+		assert_noop!(
+			Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())),
+			Error::<Test>::UsernameJudgementOngoing
+		);
+
+		// Once the case on the username is closed
+		PendingUsernameReports::<Test>::take(alias);
+
+		// The identity can be cleared
+		assert_ok!(Identity::clear_personal_identity(RuntimeOrigin::signed(who_account.clone())));
+	});
+}
+
+#[test]
+fn regular_username_calls_fail_for_people() {
+	new_test_ext().execute_with(|| {
+		// set up authority
+		let initial_authority_balance = 1000;
+		let authority = account(100);
+		Balances::make_free_balance_be(&authority, initial_authority_balance);
+		let suffix: Vec<u8> = b"test".to_vec();
+		let allocation: u32 = 10;
+		assert_ok!(Identity::add_username_authority(
+			RuntimeOrigin::root(),
+			authority.clone(),
+			suffix.clone(),
+			allocation
+		));
+
+		// set up username
+		let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+		// set up user and sign message
+		let public = sr25519_generate(0.into(), None);
+		let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+		let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+		let signature =
+			MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+		assert_ok!(Identity::set_personal_identity(
+			RuntimeOrigin::signed(who_account.clone()),
+			who_account.clone(),
+			signature.clone(),
+			username.clone(),
+		));
+
+		assert_noop!(
+			Identity::set_primary_username(
+				RuntimeOrigin::signed(who_account.clone()),
+				username.clone()
+			),
+			Error::<Test>::InvalidTarget
+		);
+
+		// set up another username
+		let second_username = test_username_of(b"101".to_vec(), suffix.clone());
+		let now = frame_system::Pallet::<Test>::block_number();
+		let expiration = now + <<Test as Config>::PendingUsernameExpiration as Get<u64>>::get();
+
+		assert_ok!(Identity::set_username_for(
+			RuntimeOrigin::signed(authority.clone()),
+			who_account.clone(),
+			second_username.clone().into(),
+			None,
+			true,
+		));
+
+		// Should be pending
+		assert_eq!(
+			PendingUsernames::<Test>::get::<&Username<Test>>(&second_username),
+			Some((who_account.clone(), expiration, Provider::Allocation))
+		);
+
+		// The user is a person, so they can't accept authority usernames.
+		assert_noop!(
+			Identity::accept_username(RuntimeOrigin::signed(who_account), second_username),
+			Error::<Test>::InvalidTarget
+		);
+	});
+}
+
+mod username_reporting {
+	use super::*;
+	use crate::types::UsernameReport;
+	use frame_support::traits::fungible::Mutate;
+
+	#[test]
+	fn fails_given_unrecognised_person() {
+		new_test_ext().execute_with(|| {
+			let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+			// given the EnsurePerson setting in these tests, all signed origins are recognised as
+			// persons
+
+			assert_noop!(
+				Identity::report_username(RuntimeOrigin::none(), username.clone()),
+				BadOrigin
+			);
+			assert_noop!(Identity::report_username(RuntimeOrigin::root(), username), BadOrigin);
+		});
+	}
+
+	#[test]
+	fn reported_username_not_exists() {
+		new_test_ext().execute_with(|| {
+			let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+			assert_noop!(
+				Identity::report_username(RuntimeOrigin::signed(account(0)), username),
+				Error::<Test>::NoUsername
+			);
+		});
+	}
+
+	#[test]
+	fn username_already_reported() {
+		new_test_ext().execute_with(|| {
+			let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+			// User set-up
+			let public = sr25519_generate(0.into(), None);
+			let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+			let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+			let signature =
+				MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+			assert_ok!(Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			));
+
+			// Overwriting pending username reports of the user for that username,
+			// to simulate a report already done
+			let case_id: Alias = [14; 32];
+			let username_report: UsernameReport<
+				sp_core::crypto::AccountId32,
+				PersonalData,
+				OracleTicketOf<Test>,
+			> = types::UsernameReport { reporter: account(12), username: username.clone(), case_id };
+			PendingUsernameReports::<Test>::insert(alias, username_report);
+
+			assert_noop!(
+				Identity::report_username(RuntimeOrigin::signed(account(0)), username),
+				Error::<Test>::AlreadyReported
+			);
+		});
+	}
+
+	#[test]
+	fn username_recently_reported() {
+		new_test_ext().execute_with(|| {
+			let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+			// User set-up
+			let public = sr25519_generate(0.into(), None);
+			let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+			let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+			let signature =
+				MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+			assert_ok!(Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			));
+
+			// Just to move a little in time
+			run_to_block(17);
+
+			// Simulating username being reported 2 blocks ago
+			let mut pid = PersonIdentities::<Test>::get(alias).unwrap();
+			pid.username_last_reported_at = Some(15);
+			PersonIdentities::<Test>::insert(alias, pid);
+
+			assert_noop!(
+				Identity::report_username(RuntimeOrigin::signed(account(0)), username),
+				Error::<Test>::LastUsernameReportTooRecent
+			);
+		});
+	}
+
+	/// Shows the flow of username reporting.
+	/// Call to report_username should result with:
+	/// - request to oracle for judgement on the provided username,
+	/// - information related to the judgement request stored in pallet storage item,
+	/// - block at which the report was made stored in personal identity metadata.
+	#[test]
+	pub fn username_reporting_flow() {
+		new_test_ext().execute_with(|| {
+			// Person A - set-up of personal identity with a username
+			let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+			let public = sr25519_generate(0.into(), None);
+			let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+			let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+			let signature =
+				MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+			assert_ok!(Identity::set_personal_identity(
+				RuntimeOrigin::signed(who_account.clone()),
+				who_account.clone(),
+				signature.clone(),
+				username.clone(),
+			));
+
+			// Person B needs some funds to be able to report
+			assert_ok!(Balances::mint_into(&account(12), 10));
+
+			// No reserved balance at this point
+			assert_eq!(Balances::reserved_balance(account(12)), 0);
+
+			// Just to move in time a little
+			run_to_block(12);
+
+			// Person B reports the username of person A
+			assert_ok!(Identity::report_username(
+				RuntimeOrigin::signed(account(12)),
+				username.clone()
+			));
+
+			// A balance reserve is executed on Person's B account
+			assert_eq!(Balances::reserved_balance(account(12)), 5);
+
+			// Information about the username report is stored
+			let report = PendingUsernameReports::<Test>::get(alias);
+			assert!(report.is_some());
+			let report = report.unwrap();
+			assert_eq!(report.case_id, alias);
+			assert_eq!(report.username, username);
+
+			// Date of the last report stored in personal identity metadata
+			let pid = PersonIdentities::<Test>::get(alias).unwrap();
+			assert_eq!(pid.username_last_reported_at, Some(12));
+
+			// A judgement by the oracle is requested
+			if let Some(Statement::UsernameValid { username: reported_username }) =
+				simple_oracle::StatementsToJudge::<Test>::get(report.case_id)
+			{
+				assert_eq!(reported_username, username);
+			} else {
+				panic!("statement is not UsernameValid");
+			}
+		});
+	}
+}
+
+mod username_report_judgement {
+	use super::*;
+	use crate::types::UsernameReport;
+	use frame_support::traits::fungible::Mutate;
+
+	#[test]
+	fn fails_given_unknown_alias() {
+		new_test_ext().execute_with(|| {
+			let ticket: OracleTicketOf<Test> = [1; 32];
+			let context: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+			let judgement = OracleJudgement::Truth(Truth::True);
+
+			assert_noop!(
+				Identity::reported_username_judged(
+					RuntimeOrigin::root(),
+					ticket,
+					context,
+					judgement
+				),
+				Error::<Test>::NoIdentity
+			);
+		});
+	}
+
+	#[test]
+	fn fails_given_unexpected_alias() {
+		new_test_ext().execute_with(|| {
+			let (_, alias, _) = prepare_personal_identity();
+
+			let ticket: OracleTicketOf<Test> = [1; 32];
+			let mut context: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+			context[..32].copy_from_slice(&alias[..]);
+			let judgement = OracleJudgement::Truth(Truth::True);
+
+			assert_noop!(
+				Identity::reported_username_judged(
+					RuntimeOrigin::root(),
+					ticket,
+					context,
+					judgement
+				),
+				Error::<Test>::UnexpectedJudgement
+			);
+		});
+	}
+
+	#[test]
+	fn fails_given_unexpected_case_id() {
+		new_test_ext().execute_with(|| {
+			let (_, alias, username) = prepare_personal_identity();
+
+			let ticket: OracleTicketOf<Test> = [1; 32];
+
+			// The case had previously been created
+			let case_id: Alias = [14; 32];
+			let username_report: UsernameReport<
+				sp_core::crypto::AccountId32,
+				PersonalData,
+				OracleTicketOf<Test>,
+			> = types::UsernameReport { reporter: account(12), username: username.clone(), case_id };
+			PendingUsernameReports::<Test>::insert(alias, username_report);
+
+			let mut context: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+			context[..32].copy_from_slice(&alias[..]);
+
+			let judgement = OracleJudgement::Truth(Truth::True);
+
+			assert_noop!(
+				Identity::reported_username_judged(
+					RuntimeOrigin::root(),
+					ticket,
+					context,
+					judgement
+				),
+				Error::<Test>::UnexpectedJudgement
+			);
+		});
+	}
+
+	#[test]
+	fn username_judged_as_valid_results_with_reporters_deposit_slash() {
+		new_test_ext().execute_with(|| {
+			let (_, alias, username) = prepare_personal_identity();
+
+			// Person B needs some funds to be able to report
+			assert_ok!(Balances::mint_into(&account(12), 10));
+
+			// No reserved balance at this point
+			assert_eq!(Balances::reserved_balance(account(12)), 0);
+
+			// Just to move in time a little
+			run_to_block(12);
+
+			// Person B reports the username of person A
+			assert_ok!(Identity::report_username(
+				RuntimeOrigin::signed(account(12)),
+				username.clone()
+			));
+
+			// A balance reserve is executed on Person's B account
+			assert_eq!(Balances::reserved_balance(account(12)), 5);
+
+			// Username report stored
+			let report = PendingUsernameReports::<Test>::get(alias).unwrap();
+
+			// Oracle returns with a judgement on the username
+			let ticket: OracleTicketOf<Test> = report.case_id;
+			let mut context: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+			context[..32].copy_from_slice(&alias[..]);
+			let judgement = OracleJudgement::Truth(Truth::True);
+
+			assert_ok!(Identity::reported_username_judged(
+				RuntimeOrigin::root(),
+				ticket,
+				context,
+				judgement
+			));
+
+			// No balance reserved on Person's B account anymore
+			assert_eq!(Balances::reserved_balance(account(12)), 0);
+
+			// But the funds were not returned to his account, thus they were slashed
+			assert_eq!(Balances::free_balance(account(12)), 5);
+		});
+	}
+
+	#[test]
+	fn username_judged_as_invalid_results_with_deposit_release_and_user_ban() {
+		new_test_ext().execute_with(|| {
+			let (_, alias, username) = prepare_personal_identity();
+
+			// Person B needs some funds to be able to report
+			assert_ok!(Balances::mint_into(&account(12), 10));
+
+			// No reserved balance at this point
+			assert_eq!(Balances::reserved_balance(account(12)), 0);
+
+			// Just to move in time a little
+			run_to_block(12);
+
+			// Person B reports the username of person A
+			assert_ok!(Identity::report_username(
+				RuntimeOrigin::signed(account(12)),
+				username.clone()
+			));
+
+			// A balance reserve is executed on Person's B account
+			assert_eq!(Balances::reserved_balance(account(12)), 5);
+
+			// Username report stored in metadata
+			let report = PendingUsernameReports::<Test>::get(alias).unwrap();
+
+			// Oracle returns with a judgement on the username
+			let ticket: OracleTicketOf<Test> = report.case_id;
+			let mut context: JudgementContext = [0u8; 64].to_vec().try_into().unwrap();
+			context[..32].copy_from_slice(&alias[..]);
+			let judgement = OracleJudgement::Truth(Truth::False);
+
+			assert_ok!(Identity::reported_username_judged(
+				RuntimeOrigin::root(),
+				ticket,
+				context,
+				judgement
+			));
+
+			// No balance reserved on Person's B account anymore
+			assert_eq!(Balances::reserved_balance(account(12)), 0);
+			// And the funds were returned to his account
+			assert_eq!(Balances::free_balance(account(12)), 10);
+
+			// The Identity behind the reported username is banned now
+			assert!(PersonIdentities::<Test>::get(alias).unwrap().banned)
+		});
+	}
+}
+
+pub fn prepare_personal_identity() -> (AccountIdOf<Test>, Alias, Username<Test>) {
+	let username: Username<Test> = b"42".to_vec().try_into().unwrap();
+
+	let public = sr25519_generate(0.into(), None);
+	let who_account: AccountIdOf<Test> = MultiSigner::Sr25519(public).into_account();
+	let alias: Alias = [<AccountIdOf<Test> as AsRef<[u8]>>::as_ref(&who_account)[0]; 32];
+	let signature = MultiSignature::Sr25519(sr25519_sign(0.into(), &public, &alias[..]).unwrap());
+
+	assert_ok!(Identity::set_personal_identity(
+		RuntimeOrigin::signed(who_account.clone()),
+		who_account.clone(),
+		signature.clone(),
+		username.clone(),
+	));
+
+	(who_account, alias, username)
 }
