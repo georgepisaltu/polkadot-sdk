@@ -32,6 +32,9 @@ use sp_runtime::TryRuntimeError;
 
 pub const PALLET_MIGRATIONS_ID: &[u8; 15] = b"pallet-identity";
 
+type RegistrationOf<T> =
+	Registration<BalanceOf<T>, <T as Config>::MaxRegistrars, <T as Config>::IdentityInformation>;
+
 pub mod versioned {
 	use super::*;
 
@@ -53,11 +56,7 @@ mod types_v0 {
 		Pallet<T>,
 		Twox64Concat,
 		<T as frame_system::Config>::AccountId,
-		Registration<
-			BalanceOf<T>,
-			<T as pallet::Config>::MaxRegistrars,
-			<T as pallet::Config>::IdentityInformation,
-		>,
+		RegistrationOf<T>,
 		OptionQuery,
 	>;
 }
@@ -71,14 +70,7 @@ mod types_v1 {
 		Pallet<T>,
 		Twox64Concat,
 		<T as frame_system::Config>::AccountId,
-		(
-			Registration<
-				BalanceOf<T>,
-				<T as pallet::Config>::MaxRegistrars,
-				<T as pallet::Config>::IdentityInformation,
-			>,
-			Option<Username<T>>,
-		),
+		(RegistrationOf<T>, Option<Username<T>>),
 		OptionQuery,
 	>;
 
@@ -115,7 +107,7 @@ pub mod v1 {
 	use super::*;
 
 	/// The log target.
-	const TARGET: &'static str = "runtime::identity::migration::v1";
+	const TARGET: &str = "runtime::identity::migration::v1";
 	/// Migration to add usernames to Identity info.
 	///
 	/// `T` is the runtime and `KL` is the key limit to migrate. This is just a safety guard to
@@ -217,14 +209,7 @@ pub mod v2 {
 	#[derive(Encode, Decode)]
 	struct TryRuntimeState<T: Config> {
 		authorities: BTreeMap<Suffix<T>, (T::AccountId, u32)>,
-		identities: BTreeMap<
-			T::AccountId,
-			Registration<
-				BalanceOf<T>,
-				<T as Config>::MaxRegistrars,
-				<T as Config>::IdentityInformation,
-			>,
-		>,
+		identities: BTreeMap<T::AccountId, RegistrationOf<T>>,
 		primary_usernames: BTreeMap<T::AccountId, Username<T>>,
 		usernames: BTreeMap<Username<T>, T::AccountId>,
 		pending_usernames: BTreeMap<Username<T>, (T::AccountId, BlockNumberFor<T>)>,
@@ -250,7 +235,7 @@ pub mod v2 {
 			// Check that we have enough weight for at least the next step. If we don't, then the
 			// migration cannot be complete.
 			let required = match &cursor {
-				Some(state) => Self::required_weight(&state),
+				Some(state) => Self::required_weight(state),
 				// Worst case weight for `authority_step`.
 				None => T::WeightInfo::migration_v2_authority_step(),
 			};
@@ -262,7 +247,7 @@ pub mod v2 {
 				// Check that we would have enough weight to perform this step in the worst case
 				// scenario.
 				let required_weight = match &cursor {
-					Some(state) => Self::required_weight(&state),
+					Some(state) => Self::required_weight(state),
 					// Worst case weight for `authority_step`.
 					None => T::WeightInfo::migration_v2_authority_step(),
 				};
@@ -385,7 +370,7 @@ pub mod v2 {
 
 			for (account, free_identity) in prev_state.identities.iter() {
 				assert_eq!(free_identity.deposit, 0u32.into());
-				assert!(UsernameOf::<T>::contains_key(&account));
+				assert!(UsernameOf::<T>::contains_key(account));
 			}
 			prev_state.identities.clear();
 
