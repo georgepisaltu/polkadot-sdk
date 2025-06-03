@@ -67,23 +67,27 @@
 //!
 //! ### Dispatchable Functions
 //!
-//! #### For General Users
+//! #### For account-based users
 //! * `set_identity` - Set the associated identity of an account; a small deposit is reserved if not
 //!   already taken.
 //! * `clear_identity` - Remove an account's associated identity; the deposit is returned.
 //! * `request_judgement` - Request a judgement from a registrar, paying a fee.
 //! * `cancel_request` - Cancel the previous request for a judgement.
 //! * `accept_username` - Accept a username issued by a username authority.
-//! * `remove_expired_approval` - Remove a username that was issued but never accepted.
 //! * `set_primary_username` - Set a given username as an account's primary.
-//! * `remove_username` - Remove a username after its grace period has ended.
 //!
-//! #### For General Users with Sub-Identities
+//! #### For account-based users with Sub-Identities
 //! * `set_subs` - Set the sub-accounts of an identity.
 //! * `add_sub` - Add a sub-identity to an identity.
 //! * `remove_sub` - Remove a sub-identity of an identity.
 //! * `rename_sub` - Rename a sub-identity of an identity.
 //! * `quit_sub` - Remove a sub-identity of an identity (called by the sub-identity).
+//!
+//! #### For People, i.e. users who have proven their personhood
+//! * `set_personal_identity` - Sets the username and on-chain account for a person.
+//! * `submit_personal_credential_evidence` - Open a case for an oracle to judge a social credential
+//!   of a person.
+//! * `clear_personal_identity` - Clear a person's username and personal identity information.
 //!
 //! #### For Registrars
 //! * `set_fee` - Set the fee required to be paid for a judgement to be given by the registrar.
@@ -100,6 +104,12 @@
 //! * `add_username_authority` - Add an account with the ability to issue usernames.
 //! * `remove_username_authority` - Remove an account with the ability to issue usernames.
 //! * `kill_username` - Forcibly remove a username.
+//! * `personal_credential_judged` - Callback for the oracle to enforce the judgement of a social
+//!   credential.
+//!
+//! #### For anyone
+//! * `remove_expired_approval` - Remove a username that was issued but never accepted.
+//! * `remove_username` - Remove a username after its grace period has ended.
 //!
 //! [`Call`]: ./enum.Call.html
 //! [`Config`]: ./trait.Config.html
@@ -111,19 +121,29 @@ pub mod legacy;
 pub mod migration;
 #[cfg(test)]
 mod tests;
-mod types;
+pub mod types;
 pub mod weights;
 
 extern crate alloc;
 
-use crate::types::{AuthorityProperties, Provider, Suffix, Username, UsernameInformation};
+use crate::types::{
+	AuthorityProperties, Data, IdentityInformationProvider, Judgement, PersonalIdentity, Provider,
+	RegistrarIndex, RegistrarInfo, Registration, Suffix, Username, UsernameInformation,
+	UsernameReport,
+};
 use alloc::{boxed::Box, vec::Vec};
 use codec::Encode;
+use core::cmp::Ordering;
 use frame_support::{
 	ensure,
 	pallet_prelude::{DispatchError, DispatchResult},
 	traits::{
-		BalanceStatus, Currency, Defensive, Get, OnUnbalanced, ReservableCurrency, StorageVersion,
+		reality::{
+			identity::Social, Alias, Callback, Context, Data as IdentityData,
+			Judgement as OracleJudgement, JudgementContext, Statement, StatementOracle, Truth,
+		},
+		BalanceStatus, Currency, Defensive, EnsureOriginWithArg, ExistenceRequirement, Get,
+		OnUnbalanced, ReservableCurrency, StorageVersion, WithdrawReasons,
 	},
 	BoundedVec,
 };
@@ -131,9 +151,6 @@ use frame_system::pallet_prelude::*;
 pub use pallet::*;
 use sp_runtime::traits::{
 	AppendZerosInput, Hash, IdentifyAccount, Saturating, StaticLookup, Verify, Zero,
-};
-pub use types::{
-	Data, IdentityInformationProvider, Judgement, RegistrarIndex, RegistrarInfo, Registration,
 };
 pub use weights::WeightInfo;
 
@@ -143,12 +160,16 @@ type NegativeImbalanceOf<T> = <<T as Config>::Currency as Currency<
 	<T as frame_system::Config>::AccountId,
 >>::NegativeImbalance;
 type AccountIdLookupOf<T> = <<T as frame_system::Config>::Lookup as StaticLookup>::Source;
+pub type OracleTicketOf<T> =
+	<<T as Config>::Oracle as StatementOracle<<T as frame_system::Config>::RuntimeCall>>::Ticket;
 type ProviderOf<T> = Provider<BalanceOf<T>>;
 
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
 	use frame_support::pallet_prelude::*;
+
+	pub const IDENTITY_CONTEXT: Context = *b"pop:polkadot.network/identity   ";
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
@@ -178,9 +199,19 @@ pub mod pallet {
 		#[pallet::constant]
 		type SubAccountDeposit: Get<BalanceOf<Self>>;
 
+		/// The amount held on deposit per reported username.
+		#[pallet::constant]
+		type UsernameReportDeposit: Get<BalanceOf<Self>>;
+
 		/// The maximum number of sub-accounts allowed per identified account.
 		#[pallet::constant]
 		type MaxSubAccounts: Get<u32>;
+
+		/// The number of blocks that have to pass between the last time a given username was
+		/// reported and now in order to be able to report it again. In other words, it represents
+		/// the username validity safety period.
+		#[pallet::constant]
+		type UsernameReportTimeout: Get<BlockNumberFor<Self>>;
 
 		/// Structure holding information about an identity.
 		type IdentityInformation: IdentityInformationProvider;
@@ -189,6 +220,10 @@ pub mod pallet {
 		/// of, e.g., updating judgements.
 		#[pallet::constant]
 		type MaxRegistrars: Get<u32>;
+
+		/// Maximum number of judgements per personal identity allowed in the system.
+		#[pallet::constant]
+		type MaxJudgements: Get<u32>;
 
 		/// What to do with slashed funds.
 		type Slashed: OnUnbalanced<NegativeImbalanceOf<Self>>;
@@ -226,6 +261,24 @@ pub mod pallet {
 		/// The maximum length of a username, including its suffix and any system-added delimiters.
 		#[pallet::constant]
 		type MaxUsernameLength: Get<u32>;
+
+		/// The minimum length of a username or suffix.
+		#[pallet::constant]
+		type MinUsernameLength: Get<u32>;
+
+		/// Oracle used to:
+		/// - determine whether the evidence supplied of establishing an identity is
+		/// real or not,
+		/// - determine whether a given username is valid or not.
+		type Oracle: StatementOracle<Self::RuntimeCall>;
+
+		/// How to recognise an origin representing a person.
+		type EnsurePerson: EnsureOriginWithArg<OriginFor<Self>, Context, Success = Alias>;
+
+		/// The fee that a person must pay through their associated on-chain account in order to
+		/// remove their identity.
+		#[pallet::constant]
+		type CredentialRemovalPenalty: Get<BalanceOf<Self>>;
 
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
@@ -316,12 +369,15 @@ pub mod pallet {
 	>;
 
 	/// Usernames that an authority has granted, but that the account controller has not confirmed
-	/// that they want it. Used primarily in cases where the `AccountId` cannot provide a signature
+	/// that they want it.
+	///
+	/// Used primarily in cases where the `AccountId` cannot provide a signature
 	/// because they are a pure proxy, multisig, etc. In order to confirm it, they should call
 	/// [accept_username](`Call::accept_username`).
 	///
 	/// First tuple item is the account and second is the acceptance deadline.
 	#[pallet::storage]
+	#[pallet::getter(fn preapproved_usernames)]
 	pub type PendingUsernames<T: Config> = StorageMap<
 		_,
 		Blake2_128Concat,
@@ -338,10 +394,39 @@ pub mod pallet {
 	pub type UnbindingUsernames<T: Config> =
 		StorageMap<_, Blake2_128Concat, Username<T>, BlockNumberFor<T>, OptionQuery>;
 
+	/// The metadata associated with a person through their contextual alias for the purposes of
+	/// registering identity information.
+	#[pallet::storage]
+	pub type PersonIdentities<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		Alias,
+		PersonalIdentity<T::AccountId, OracleTicketOf<T>, T::MaxJudgements, BlockNumberFor<T>>,
+		OptionQuery,
+	>;
+
+	/// Reverse lookup of accounts controlled by a person through a contextual alias. All people
+	/// that registered an identity must also associate an on-chain account to it.
+	#[pallet::storage]
+	pub type AccountToAlias<T: Config> =
+		StorageMap<_, Blake2_128Concat, T::AccountId, Alias, OptionQuery>;
+
+	/// Stores pending reports of usernames.
+	#[pallet::storage]
+	pub type PendingUsernameReports<T: Config> = StorageMap<
+		_,
+		Blake2_128Concat,
+		Alias,
+		UsernameReport<T::AccountId, Username<T>, OracleTicketOf<T>>,
+		OptionQuery,
+	>;
+
 	#[pallet::error]
 	pub enum Error<T> {
 		/// Too many subs-accounts.
 		TooManySubAccounts,
+		/// No alias found for an account.
+		NoAlias,
 		/// Account isn't found.
 		NotFound,
 		/// Account isn't named.
@@ -366,6 +451,8 @@ pub mod pallet {
 		TooManyRegistrars,
 		/// Account ID is already named.
 		AlreadyClaimed,
+		/// Username has already been reported.
+		AlreadyReported,
 		/// Sender is not a sub-account.
 		NotSub,
 		/// Sub-account isn't owned by sender.
@@ -390,6 +477,8 @@ pub mod pallet {
 		UsernameTaken,
 		/// The requested username does not exist.
 		NoUsername,
+		/// The reported username was not provided by the system.
+		NotSystemProvidedUsername,
 		/// The username cannot be forcefully removed because it can still be accepted.
 		NotExpired,
 		/// The username cannot be removed because it's still in the grace period.
@@ -401,6 +490,22 @@ pub mod pallet {
 		/// The action cannot be performed because of insufficient privileges (e.g. authority
 		/// trying to unbind a username provided by the system).
 		InsufficientPrivileges,
+		/// The context in which the alias was used is not supported.
+		BadContext,
+		/// No associated request for the judgement received.
+		UnexpectedJudgement,
+		/// The social credential is not supported by the configured identity information provider.
+		NotSupported,
+		/// The person is banned and cannot perform the operation.
+		Banned,
+		/// The person already has a personal identity associated with their alias.
+		AlreadyRegistered,
+		/// The list of judgements ongoing on a personal identity is full.
+		JudgementListFull,
+		/// The username has been reported too recently.
+		LastUsernameReportTooRecent,
+		/// The username has been reported and is undergoing validity judgement.
+		UsernameJudgementOngoing,
 	}
 
 	#[pallet::event]
@@ -452,6 +557,36 @@ pub mod pallet {
 		UsernameRemoved { username: Username<T> },
 		/// A username has been killed.
 		UsernameKilled { username: Username<T> },
+		/// A username has been reported.
+		UsernameReported { reporter: T::AccountId, username: Username<T> },
+		/// An identity for a person has been set.
+		PersonalIdentitySet { alias: Alias, account: T::AccountId, username: Username<T> },
+		/// Evidence for a credential has beed submitted by a person.
+		EvidenceSubmitted { alias: Alias },
+		/// A credential was accepted for a person.
+		CredentialAccepted { alias: Alias },
+		/// A credential was rejected for a person.
+		CredentialRejected { alias: Alias },
+		/// Person was banned for sending contemptuous evidence.
+		PersonBanned { alias: Alias },
+		/// A personal identity was cleared.
+		PersonalIdentityCleared { alias: Alias },
+		/// A reported username was judged valid.
+		ReportedUsernameJudgedValid { username: Username<T> },
+		/// A reported username was judged invalid.
+		ReportedUsernameJudgedInvalid { username: Username<T> },
+		/// The judgment regarding a reported username was unclear or uncertain.
+		ReportedUsernameWeakOrUnclearJudgement { username: Username<T>, judgement: OracleJudgement },
+	}
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		fn integrity_test() {
+			assert!(
+				IdentityData::bound() >= Username::<T>::bound(),
+				"username must fit in the credential data"
+			);
+		}
 	}
 
 	#[pallet::call]
@@ -508,6 +643,7 @@ pub mod pallet {
 			info: Box<T::IdentityInformation>,
 		) -> DispatchResultWithPostInfo {
 			let sender = ensure_signed(origin)?;
+			ensure!(!AccountToAlias::<T>::contains_key(&sender), Error::<T>::InvalidTarget);
 
 			let mut id = match IdentityOf::<T>::get(&sender) {
 				Some(mut id) => {
@@ -559,6 +695,7 @@ pub mod pallet {
 			subs: Vec<(T::AccountId, Data)>,
 		) -> DispatchResultWithPostInfo {
 			let sender = ensure_signed(origin)?;
+			ensure!(!AccountToAlias::<T>::contains_key(&sender), Error::<T>::InvalidTarget);
 			ensure!(IdentityOf::<T>::contains_key(&sender), Error::<T>::NotFound);
 			ensure!(
 				subs.len() <= T::MaxSubAccounts::get() as usize,
@@ -572,13 +709,18 @@ pub mod pallet {
 				subs.iter().filter_map(|i| SuperOf::<T>::get(&i.0)).all(|i| i.0 == sender);
 			ensure!(not_other_sub, Error::<T>::AlreadyClaimed);
 
-			if old_deposit < new_deposit {
-				T::Currency::reserve(&sender, new_deposit - old_deposit)?;
-			} else if old_deposit > new_deposit {
-				let err_amount = T::Currency::unreserve(&sender, old_deposit - new_deposit);
-				debug_assert!(err_amount.is_zero());
-			}
-			// do nothing if they're equal.
+			match old_deposit.cmp(&new_deposit) {
+				Ordering::Greater => {
+					let err_amount = T::Currency::unreserve(&sender, old_deposit - new_deposit);
+					debug_assert!(err_amount.is_zero());
+				},
+				Ordering::Less => {
+					T::Currency::reserve(&sender, new_deposit - old_deposit)?;
+				},
+				Ordering::Equal => {
+					// do nothing if they're equal.
+				},
+			};
 
 			for s in old_ids.iter() {
 				SuperOf::<T>::remove(s);
@@ -625,6 +767,7 @@ pub mod pallet {
 		))]
 		pub fn clear_identity(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
 			let sender = ensure_signed(origin)?;
+			ensure!(!AccountToAlias::<T>::contains_key(&sender), Error::<T>::InvalidTarget);
 
 			let (subs_deposit, sub_ids) = SubsOf::<T>::take(&sender);
 			let id = IdentityOf::<T>::take(&sender).ok_or(Error::<T>::NoIdentity)?;
@@ -658,7 +801,7 @@ pub mod pallet {
 		/// - `max_fee`: The maximum fee that may be paid. This should just be auto-populated as:
 		///
 		/// ```nocompile
-		/// Registrars::<T>::get().get(reg_index).unwrap().fee
+		/// Self::registrars().get(reg_index).unwrap().fee
 		/// ```
 		///
 		/// Emits `JudgementRequested` if successful.
@@ -670,6 +813,7 @@ pub mod pallet {
 			#[pallet::compact] max_fee: BalanceOf<T>,
 		) -> DispatchResultWithPostInfo {
 			let sender = ensure_signed(origin)?;
+			ensure!(!AccountToAlias::<T>::contains_key(&sender), Error::<T>::InvalidTarget);
 			let registrars = Registrars::<T>::get();
 			let registrar = registrars
 				.get(reg_index as usize)
@@ -964,6 +1108,7 @@ pub mod pallet {
 			data: Data,
 		) -> DispatchResult {
 			let sender = ensure_signed(origin)?;
+			ensure!(!AccountToAlias::<T>::contains_key(&sender), Error::<T>::InvalidTarget);
 			let sub = T::Lookup::lookup(sub)?;
 			ensure!(IdentityOf::<T>::contains_key(&sender), Error::<T>::NoIdentity);
 
@@ -1002,7 +1147,7 @@ pub mod pallet {
 			let sender = ensure_signed(origin)?;
 			let sub = T::Lookup::lookup(sub)?;
 			ensure!(IdentityOf::<T>::contains_key(&sender), Error::<T>::NoIdentity);
-			ensure!(SuperOf::<T>::get(&sub).map_or(false, |x| x.0 == sender), Error::<T>::NotOwned);
+			ensure!(SuperOf::<T>::get(&sub).is_some_and(|x| x.0 == sender), Error::<T>::NotOwned);
 			SuperOf::<T>::insert(&sub, (&sender, data));
 
 			Self::deposit_event(Event::SubIdentityRenamed { main: sender, sub });
@@ -1184,7 +1329,8 @@ pub mod pallet {
 		}
 
 		/// Accept a given username that an `authority` granted. The call must include the full
-		/// username, as in `username.suffix`.
+		/// username, as in `username.suffix`. Authorities cannot grant usernames to people, only
+		/// to regular accounts.
 		#[pallet::call_index(18)]
 		#[pallet::weight(T::WeightInfo::accept_username())]
 		pub fn accept_username(
@@ -1192,6 +1338,7 @@ pub mod pallet {
 			username: Username<T>,
 		) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
+			ensure!(!AccountToAlias::<T>::contains_key(&who), Error::<T>::InvalidTarget);
 			let (approved_for, _, provider) =
 				PendingUsernames::<T>::take(&username).ok_or(Error::<T>::NoUsername)?;
 			ensure!(approved_for == who.clone(), Error::<T>::InvalidUsername);
@@ -1240,15 +1387,19 @@ pub mod pallet {
 			}
 		}
 
-		/// Set a given username as the primary. The username should include the suffix.
+		/// Set a given username as the primary. The username should include the suffix. Only
+		/// regular accounts can set their primary username, as people can only have one username,
+		/// granted through a system allocation.
 		#[pallet::call_index(20)]
 		#[pallet::weight(T::WeightInfo::set_primary_username())]
 		pub fn set_primary_username(origin: OriginFor<T>, username: Username<T>) -> DispatchResult {
 			// ensure `username` maps to `origin` (i.e. has already been set by an authority).
 			let who = ensure_signed(origin)?;
-			let account_of_username =
-				UsernameInfoOf::<T>::get(&username).ok_or(Error::<T>::NoUsername)?.owner;
-			ensure!(who == account_of_username, Error::<T>::InvalidUsername);
+			let username_info =
+				UsernameInfoOf::<T>::get(&username).ok_or(Error::<T>::NoUsername)?;
+			// People can't have multiple usernames.
+			ensure!(!matches!(username_info.provider, Provider::System), Error::<T>::InvalidTarget);
+			ensure!(who == username_info.owner, Error::<T>::InvalidUsername);
 			UsernameOf::<T>::insert(&who, username.clone());
 			Self::deposit_event(Event::PrimaryUsernameSet { who: who.clone(), username });
 			Ok(())
@@ -1304,7 +1455,7 @@ pub mod pallet {
 				.ok_or(Error::<T>::NoUsername)?;
 			// If this is the primary username, remove the entry from the account -> username map.
 			UsernameOf::<T>::mutate(&username_info.owner, |maybe_primary| {
-				if maybe_primary.as_ref().map_or(false, |primary| *primary == username) {
+				if maybe_primary.as_ref().is_some_and(|primary| *primary == username) {
 					*maybe_primary = None;
 				}
 			});
@@ -1343,10 +1494,7 @@ pub mod pallet {
 				UsernameInfoOf::<T>::take(&username).ok_or(Error::<T>::NoUsername)?;
 			// If this is the primary username, remove the entry from the account -> username map.
 			UsernameOf::<T>::mutate(&username_info.owner, |maybe_primary| {
-				if match maybe_primary {
-					Some(primary) if *primary == username => true,
-					_ => false,
-				} {
+				if matches!(maybe_primary, Some(primary) if *primary == username) {
 					*maybe_primary = None;
 				}
 			});
@@ -1376,6 +1524,337 @@ pub mod pallet {
 			Self::deposit_event(Event::UsernameKilled { username });
 			Ok((Some(actual_weight), Pays::No).into())
 		}
+
+		/// Sets the username and on-chain account for a person, along with an empty identity which
+		/// can only be populated using an oracle through the social credential verification system.
+		/// The chosen username must be domainless.
+		///
+		/// The sender must sign the alias using the key associated with the provided on-chain
+		/// account to prove ownership.
+		///
+		/// The dispatch origin for this call must be the contextual alias of the person and the
+		/// sender must not have already registered their identity and username.
+		///
+		/// Emits `PersonalIdentitySet` if successful.
+		#[pallet::call_index(24)]
+		#[pallet::weight(T::WeightInfo::set_personal_identity())]
+		pub fn set_personal_identity(
+			origin: OriginFor<T>,
+			account: T::AccountId,
+			signature: T::OffchainSignature,
+			username: Username<T>,
+		) -> DispatchResult {
+			let alias = T::EnsurePerson::ensure_origin(origin, &IDENTITY_CONTEXT)?;
+
+			// Make sure the username is valid.
+			Self::validate_personal_username(&username)?;
+
+			ensure!(!PersonIdentities::<T>::contains_key(alias), Error::<T>::AlreadyRegistered);
+			ensure!(!IdentityOf::<T>::contains_key(&account), Error::<T>::AlreadyRegistered);
+			ensure!(!UsernameOf::<T>::contains_key(&account), Error::<T>::AlreadyRegistered);
+			ensure!(!AccountToAlias::<T>::contains_key(&account), Error::<T>::AlreadyRegistered);
+			ensure!(!UsernameInfoOf::<T>::contains_key(&username), Error::<T>::AlreadyRegistered);
+			ensure!(signature.verify(&alias[..], &account), Error::<T>::InvalidSignature);
+
+			let id = Registration {
+				info: Default::default(),
+				judgements: alloc::vec![(RegistrarIndex::MAX, Judgement::External)]
+					.try_into()
+					.expect("judgements must be able to hold at least one element; qed"),
+				deposit: Zero::zero(),
+			};
+			IdentityOf::<T>::insert(&account, id);
+			PersonIdentities::<T>::insert(alias, PersonalIdentity::new(account.clone()));
+			AccountToAlias::<T>::insert(&account, alias);
+			UsernameOf::<T>::insert(&account, &username);
+			let username_info =
+				UsernameInformation { owner: account.clone(), provider: Provider::new_permanent() };
+			UsernameInfoOf::<T>::insert(&username, username_info);
+			Self::deposit_event(Event::PersonalIdentitySet { alias, account, username });
+
+			Ok(())
+		}
+
+		/// Open a case for an oracle to judge a social credential of a person.
+		///
+		/// The dispatch origin for this call must be the contextual alias of the person and the
+		/// sender must have a registered identity.
+		///
+		/// Emits `EvidenceSubmitted` if successful.
+		#[pallet::call_index(25)]
+		#[pallet::weight(T::WeightInfo::submit_personal_credential_evidence())]
+		pub fn submit_personal_credential_evidence(
+			origin: OriginFor<T>,
+			credential: Social,
+		) -> DispatchResultWithPostInfo {
+			let alias = T::EnsurePerson::ensure_origin(origin, &IDENTITY_CONTEXT)?;
+			let mut personal_identity =
+				PersonIdentities::<T>::get(alias).ok_or(Error::<T>::NotFound)?;
+			ensure!(!personal_identity.banned, Error::<T>::Banned);
+			ensure!(!personal_identity.pending_social(&credential), Error::<T>::AlreadyClaimed);
+			ensure!(!personal_identity.pending_judgements.is_full(), Error::<T>::JudgementListFull);
+			let username =
+				UsernameOf::<T>::get(&personal_identity.account).ok_or(Error::<T>::NoIdentity)?;
+
+			let context = JudgementContext::truncate_from(alias.to_vec());
+			let callback = Callback::from_parts(Pallet::<T>::index() as u8, 26); // Call::<T>::judged();
+
+			let evidence: IdentityData = username
+				.into_inner()
+				.try_into()
+				.expect("username fits in the credential data, checked in integrity test; qed");
+			let statement =
+				Statement::IdentityCredential { platform: credential.clone(), evidence };
+			let id = T::Oracle::judge_statement(statement, context, callback)?;
+			personal_identity
+				.pending_judgements
+				.try_push((credential, id))
+				.expect("len and previous existence checked above; qed");
+			PersonIdentities::<T>::insert(alias, personal_identity);
+
+			Self::deposit_event(Event::EvidenceSubmitted { alias });
+
+			Ok(Pays::No.into())
+		}
+
+		/// Callback to enforce the judgement of a social credential. This is to be called only by
+		/// the oracle that judged the case.
+		#[pallet::call_index(26)]
+		#[pallet::weight(T::WeightInfo::personal_credential_judged())]
+		pub fn personal_credential_judged(
+			origin: OriginFor<T>,
+			ticket: OracleTicketOf<T>,
+			context: JudgementContext,
+			judgement: OracleJudgement,
+		) -> DispatchResultWithPostInfo {
+			ensure_root(origin)?;
+			let alias = Alias::decode(&mut &context[..]).map_err(|_| Error::<T>::BadContext)?;
+			let mut personal_identity =
+				PersonIdentities::<T>::get(alias).ok_or(Error::<T>::NotFound)?;
+			let social =
+				personal_identity.take_pending(ticket).ok_or(Error::<T>::UnexpectedJudgement)?;
+			let mut registration =
+				IdentityOf::<T>::get(&personal_identity.account).ok_or(Error::<T>::NoIdentity)?;
+
+			match judgement {
+				OracleJudgement::Truth(Truth::True) => {
+					registration.info.set_social(social).map_err(|_| Error::<T>::NotSupported)?;
+					IdentityOf::<T>::insert(&personal_identity.account, registration);
+					PersonIdentities::<T>::insert(alias, &personal_identity);
+					Self::deposit_event(Event::CredentialAccepted { alias });
+				},
+				OracleJudgement::Truth(Truth::False) => {
+					// We give the user another chance.
+					Self::deposit_event(Event::CredentialRejected { alias });
+				},
+				OracleJudgement::Contempt => {
+					// The user will receive a ban in order to prevent spam.
+					personal_identity.banned = true;
+					PersonIdentities::<T>::insert(alias, personal_identity);
+					Self::deposit_event(Event::PersonBanned { alias });
+				},
+			}
+
+			Ok(Pays::No.into())
+		}
+
+		/// Clear a person's identity info. The sender must pay a penalty through the associated
+		/// alias account for removing the identity.
+		///
+		/// The dispatch origin for this call must be the contextual alias of the person and the
+		/// sender must have a registered identity.
+		///
+		/// Emits `IdentityPersonalCleared` if successful.
+		#[pallet::call_index(27)]
+		#[pallet::weight(T::WeightInfo::clear_personal_identity())]
+		pub fn clear_personal_identity(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
+			let alias = T::EnsurePerson::ensure_origin(origin, &IDENTITY_CONTEXT)?;
+
+			// If a username was reported, one cannot remove their identity as a way to evade the
+			// judgement.
+			ensure!(
+				!PendingUsernameReports::<T>::contains_key(alias),
+				Error::<T>::UsernameJudgementOngoing
+			);
+
+			let personal_identity =
+				PersonIdentities::<T>::take(alias).ok_or(Error::<T>::NotFound)?;
+			// People shouldn't be able to set subs.
+			debug_assert!(!SubsOf::<T>::contains_key(&personal_identity.account));
+			let _ = AccountToAlias::<T>::take(&personal_identity.account)
+				.ok_or(Error::<T>::NotFound)?;
+			let _ =
+				IdentityOf::<T>::take(&personal_identity.account).ok_or(Error::<T>::NoIdentity)?;
+			let username =
+				UsernameOf::<T>::take(&personal_identity.account).ok_or(Error::<T>::NoUsername)?;
+			ensure!(
+				matches!(
+					UsernameInfoOf::<T>::take(&username).ok_or(Error::<T>::NoUsername)?.provider,
+					Provider::System
+				),
+				Error::<T>::InvalidUsername
+			);
+
+			// Apply the removal penalty so that we discourage people from spamming the personal
+			// identity system.
+			let removal_penalty = T::CredentialRemovalPenalty::get();
+			T::Slashed::on_unbalanced(T::Currency::withdraw(
+				&personal_identity.account,
+				removal_penalty,
+				WithdrawReasons::FEE,
+				ExistenceRequirement::AllowDeath,
+			)?);
+
+			Self::deposit_event(Event::PersonalIdentityCleared { alias });
+
+			Ok(Pays::No.into())
+		}
+
+		/// Report a username as invalid/offensive/wrong/anything else.
+		///
+		/// The dispatch origin for this call must be a signed extrinsic.
+		///
+		/// - `username`: The username to be reported.
+		#[pallet::call_index(28)]
+		#[pallet::weight(T::WeightInfo::report_username())]
+		pub fn report_username(origin: OriginFor<T>, username: Username<T>) -> DispatchResult {
+			let reporter_account = ensure_signed(origin.clone())?;
+
+			// Make sure the username exists
+			let username_info =
+				UsernameInfoOf::<T>::get(username.clone()).ok_or(Error::<T>::NoUsername)?;
+			// Make sure the username was issued by the system
+			ensure!(
+				username_info.provider == Provider::System,
+				Error::<T>::NotSystemProvidedUsername
+			);
+
+			// Find the identity behind the reported username
+			let alias =
+				AccountToAlias::<T>::get(&username_info.owner).ok_or(Error::<T>::NoAlias)?;
+			let mut personal_identity =
+				PersonIdentities::<T>::get(alias).ok_or(Error::<T>::NoIdentity)?;
+			let statement_username: IdentityData = username
+				.clone()
+				.into_inner()
+				.try_into()
+				.expect("username matches the credential data, checked in integrity test; qed");
+
+			// Check if there already is a pending report for this alias
+			ensure!(!PendingUsernameReports::<T>::contains_key(alias), Error::<T>::AlreadyReported);
+
+			// Check if the timeout to report the username again has passed
+			let current_block = <frame_system::Pallet<T>>::block_number();
+			if let Some(reported_at) = personal_identity.username_last_reported_at {
+				ensure!(
+					current_block.saturating_sub(reported_at) > T::UsernameReportTimeout::get(),
+					Error::<T>::LastUsernameReportTooRecent
+				);
+			};
+
+			// Take a deposit from the reporter
+			T::Currency::reserve(&reporter_account, T::UsernameReportDeposit::get())?;
+
+			let context = JudgementContext::truncate_from(alias.to_vec());
+
+			// call_index 29 refers to callback fn reported_username_judged
+			let callback = Callback::from_parts(Pallet::<T>::index() as u8, 29);
+
+			let statement = Statement::UsernameValid { username: statement_username };
+			let case_id = T::Oracle::judge_statement(statement, context, callback)?;
+
+			let username_report = UsernameReport {
+				reporter: reporter_account.clone(),
+				username: username.clone(),
+				case_id,
+			};
+			PendingUsernameReports::<T>::insert(alias, username_report);
+
+			// Store the block at which the username was reported
+			personal_identity.username_last_reported_at = Some(current_block);
+			PersonIdentities::<T>::insert(alias, personal_identity);
+
+			Self::deposit_event(Event::UsernameReported { reporter: reporter_account, username });
+
+			Ok(())
+		}
+
+		/// Given judgement on a previously reported username either:
+		/// 1. In case username was found valid:
+		/// - slashes the amount deposited by the reporter,
+		/// - does nothing to the identity behind the reported username,
+		/// 2. In case username was found invalid:
+		/// - returns the deposited funds to the reporter,
+		/// - bans the identity behind the reported username.
+		/// Serves as a callback used upon judgement request to the oracle.
+		/// Must only be used by the statement oracle.
+		#[pallet::call_index(29)]
+		#[pallet::weight(T::WeightInfo::reported_username_judged_false().max(T::WeightInfo::reported_username_judged_true()))]
+		pub fn reported_username_judged(
+			origin: OriginFor<T>,
+			ticket: crate::OracleTicketOf<T>,
+			context: JudgementContext,
+			judgement: OracleJudgement,
+		) -> DispatchResultWithPostInfo {
+			ensure_root(origin)?;
+			let alias = Alias::decode(&mut &context[..]).map_err(|_| Error::<T>::BadContext)?;
+			let mut personal_identity =
+				PersonIdentities::<T>::get(alias).ok_or(Error::<T>::NoIdentity)?;
+
+			let username_report =
+				PendingUsernameReports::<T>::take(alias).ok_or(Error::<T>::UnexpectedJudgement)?;
+			ensure!(username_report.case_id == ticket, Error::<T>::UnexpectedJudgement);
+
+			let actual_weight = match judgement {
+				OracleJudgement::Truth(Truth::True) => {
+					// Username found valid.
+					// Slash reporter's deposit.
+					T::Slashed::on_unbalanced(
+						T::Currency::slash_reserved(
+							&username_report.reporter,
+							T::UsernameReportDeposit::get(),
+						)
+						.0,
+					);
+
+					Self::deposit_event(Event::ReportedUsernameJudgedValid {
+						username: username_report.username.clone(),
+					});
+
+					T::WeightInfo::reported_username_judged_true()
+				},
+				OracleJudgement::Truth(Truth::False) | OracleJudgement::Contempt => {
+					// Username found invalid.
+					// Reporter's deposit is returned to him.
+					// The Identity behind the username is banned.
+					let err_amount = T::Currency::unreserve(
+						&username_report.reporter,
+						T::UsernameReportDeposit::get(),
+					);
+					debug_assert!(err_amount.is_zero());
+
+					personal_identity.banned = true;
+					PersonIdentities::<T>::insert(alias, personal_identity);
+
+					Self::deposit_event(Event::ReportedUsernameJudgedInvalid {
+						username: username_report.username.clone(),
+					});
+
+					T::WeightInfo::reported_username_judged_false()
+				},
+			};
+
+			Ok((Some(actual_weight), Pays::No).into())
+		}
+	}
+
+	#[pallet::extra_constants]
+	impl<T: Config> Pallet<T> {
+		/// The context used for the proofs required to authenticate as a personal alias in
+		/// identity.
+		pub fn identity_context() -> Context {
+			IDENTITY_CONTEXT
+		}
 	}
 }
 
@@ -1391,7 +1870,7 @@ impl<T: Config> Pallet<T> {
 
 	/// Calculate the deposit required for a number of `sub` accounts.
 	fn subs_deposit(subs: u32) -> BalanceOf<T> {
-		T::SubAccountDeposit::get().saturating_mul(BalanceOf::<T>::from(subs))
+		T::SubAccountDeposit::get().saturating_mul(<BalanceOf<T>>::from(subs))
 	}
 
 	/// Take the `current` deposit that `who` is holding, and update it to a `new` one.
@@ -1400,11 +1879,17 @@ impl<T: Config> Pallet<T> {
 		current: BalanceOf<T>,
 		new: BalanceOf<T>,
 	) -> DispatchResult {
-		if new > current {
-			T::Currency::reserve(who, new - current)?;
-		} else if new < current {
-			let err_amount = T::Currency::unreserve(who, current - new);
-			debug_assert!(err_amount.is_zero());
+		match new.cmp(&current) {
+			Ordering::Greater => {
+				T::Currency::reserve(who, new - current)?;
+			},
+			Ordering::Less => {
+				let err_amount = T::Currency::unreserve(who, current - new);
+				debug_assert!(err_amount.is_zero());
+			},
+			Ordering::Equal => {
+				// Do nothing
+			},
 		}
 		Ok(())
 	}
@@ -1415,13 +1900,13 @@ impl<T: Config> Pallet<T> {
 		fields: <T::IdentityInformation as IdentityInformationProvider>::FieldsIdentifier,
 	) -> bool {
 		IdentityOf::<T>::get(who)
-			.map_or(false, |registration| (registration.info.has_identity(fields)))
+			.is_some_and(|registration| (registration.info.has_identity(fields)))
 	}
 
 	/// Calculate the deposit required for an identity.
 	fn calculate_identity_deposit(info: &T::IdentityInformation) -> BalanceOf<T> {
 		let bytes = info.encoded_size() as u32;
-		let byte_deposit = T::ByteDeposit::get().saturating_mul(BalanceOf::<T>::from(bytes));
+		let byte_deposit = T::ByteDeposit::get().saturating_mul(<BalanceOf<T>>::from(bytes));
 		T::BasicDeposit::get().saturating_add(byte_deposit)
 	}
 
@@ -1430,7 +1915,7 @@ impl<T: Config> Pallet<T> {
 	/// The function will validate the characters in `username`. It is expected to pass a fully
 	/// formatted username here (i.e. "username.suffix"). The suffix is also separately validated
 	/// and returned by this function.
-	fn validate_username(username: &Vec<u8>) -> Result<Suffix<T>, DispatchError> {
+	fn validate_username(username: &[u8]) -> Result<Suffix<T>, DispatchError> {
 		// Verify input length before allocating a Vec with the user's input.
 		ensure!(
 			username.len() <= T::MaxUsernameLength::get() as usize,
@@ -1443,7 +1928,7 @@ impl<T: Config> Pallet<T> {
 			username.iter().rposition(|c| *c == b'.').ok_or(Error::<T>::InvalidUsername)?;
 		ensure!(separator_idx > 0, Error::<T>::InvalidUsername);
 		let suffix_start = separator_idx.checked_add(1).ok_or(Error::<T>::InvalidUsername)?;
-		ensure!(suffix_start < username.len(), Error::<T>::InvalidUsername);
+		ensure!(suffix_start > T::MinUsernameLength::get() as usize, Error::<T>::InvalidUsername);
 		// Username must be lowercase and alphanumeric.
 		ensure!(
 			username
@@ -1452,11 +1937,29 @@ impl<T: Config> Pallet<T> {
 				.all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()),
 			Error::<T>::InvalidUsername
 		);
-		let suffix: Suffix<T> = (&username[suffix_start..])
+		let suffix: Suffix<T> = (username[suffix_start..])
 			.to_vec()
 			.try_into()
 			.map_err(|_| Error::<T>::InvalidUsername)?;
+		ensure!(suffix.len() >= T::MinUsernameLength::get() as usize, Error::<T>::InvalidUsername);
 		Ok(suffix)
+	}
+
+	/// Validate that a personal, domainless username conforms to allowed characters/format.
+	///
+	/// The function will validate the characters in `username`.
+	fn validate_personal_username(username: &Username<T>) -> Result<(), DispatchError> {
+		// Usernames cannot be empty.
+		ensure!(
+			username.len() >= T::MinUsernameLength::get() as usize,
+			Error::<T>::InvalidUsername
+		);
+
+		ensure!(
+			username.iter().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()),
+			Error::<T>::InvalidUsername
+		);
+		Ok(())
 	}
 
 	/// Return the suffix of a username, if it is valid.
@@ -1466,13 +1969,13 @@ impl<T: Config> Pallet<T> {
 		if suffix_start >= username.len() {
 			return None;
 		}
-		(&username[suffix_start..]).to_vec().try_into().ok()
+		(username[suffix_start..]).to_vec().try_into().ok()
 	}
 
 	/// Validate that a suffix conforms to allowed characters/format.
-	fn validate_suffix(suffix: &Vec<u8>) -> Result<(), DispatchError> {
+	fn validate_suffix(suffix: &[u8]) -> Result<(), DispatchError> {
 		ensure!(suffix.len() <= T::MaxSuffixLength::get() as usize, Error::<T>::InvalidSuffix);
-		ensure!(!suffix.is_empty(), Error::<T>::InvalidSuffix);
+		ensure!(suffix.len() >= T::MinUsernameLength::get() as usize, Error::<T>::InvalidSuffix);
 		ensure!(
 			suffix.iter().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()),
 			Error::<T>::InvalidSuffix
@@ -1487,19 +1990,20 @@ impl<T: Config> Pallet<T> {
 		signer: &T::AccountId,
 	) -> DispatchResult {
 		// Happy path, user has signed the raw data.
-		if signature.verify(data, &signer) {
+		if signature.verify(data, signer) {
 			return Ok(())
 		}
 		// NOTE: for security reasons modern UIs implicitly wrap the data requested to sign into
 		// `<Bytes> + data + </Bytes>`, so why we support both wrapped and raw versions.
 		let prefix = b"<Bytes>";
 		let suffix = b"</Bytes>";
-		let mut wrapped: Vec<u8> = Vec::with_capacity(data.len() + prefix.len() + suffix.len());
+		let mut wrapped: alloc::vec::Vec<u8> =
+			alloc::vec::Vec::with_capacity(data.len() + prefix.len() + suffix.len());
 		wrapped.extend(prefix);
 		wrapped.extend(data);
 		wrapped.extend(suffix);
 
-		ensure!(signature.verify(&wrapped[..], &signer), Error::<T>::InvalidSignature);
+		ensure!(signature.verify(&wrapped[..], signer), Error::<T>::InvalidSignature);
 
 		Ok(())
 	}
@@ -1508,7 +2012,7 @@ impl<T: Config> Pallet<T> {
 	pub fn insert_username(who: &T::AccountId, username: Username<T>, provider: ProviderOf<T>) {
 		// Check if they already have a primary. If so, leave it. If not, set it.
 		// Likewise, check if they have an identity. If not, give them a minimal one.
-		let (primary_username, new_is_primary) = match UsernameOf::<T>::get(&who) {
+		let (primary_username, new_is_primary) = match UsernameOf::<T>::get(who) {
 			// User has an existing Identity and a primary username. Leave it.
 			Some(primary) => (primary, false),
 			// User has an Identity but no primary. Set the new one as primary.
@@ -1516,7 +2020,7 @@ impl<T: Config> Pallet<T> {
 		};
 
 		if new_is_primary {
-			UsernameOf::<T>::insert(&who, primary_username);
+			UsernameOf::<T>::insert(who, primary_username);
 		}
 		let username_info = UsernameInformation { owner: who.clone(), provider };
 		// Enter in username map.
@@ -1551,12 +2055,12 @@ impl<T: Config> Pallet<T> {
 	pub fn reap_identity(who: &T::AccountId) -> Result<(u32, u32, u32), DispatchError> {
 		// `take` any storage items keyed by `target`
 		// identity
-		let id = IdentityOf::<T>::take(&who).ok_or(Error::<T>::NoIdentity)?;
+		let id = IdentityOf::<T>::take(who).ok_or(Error::<T>::NoIdentity)?;
 		let registrars = id.judgements.len() as u32;
 		let encoded_byte_size = id.info.encoded_size() as u32;
 
 		// subs
-		let (subs_deposit, sub_ids) = SubsOf::<T>::take(&who);
+		let (subs_deposit, sub_ids) = <SubsOf<T>>::take(who);
 		let actual_subs = sub_ids.len() as u32;
 		for sub in sub_ids.iter() {
 			SuperOf::<T>::remove(sub);
@@ -1564,7 +2068,7 @@ impl<T: Config> Pallet<T> {
 
 		// unreserve any deposits
 		let deposit = id.total_deposit().saturating_add(subs_deposit);
-		let err_amount = T::Currency::unreserve(&who, deposit);
+		let err_amount = T::Currency::unreserve(who, deposit);
 		debug_assert!(err_amount.is_zero());
 		Ok((registrars, encoded_byte_size, actual_subs))
 	}
@@ -1583,7 +2087,7 @@ impl<T: Config> Pallet<T> {
 	) -> Result<(BalanceOf<T>, BalanceOf<T>), DispatchError> {
 		// Identity Deposit
 		let new_id_deposit = IdentityOf::<T>::try_mutate(
-			&target,
+			target,
 			|identity_of| -> Result<BalanceOf<T>, DispatchError> {
 				let reg = identity_of.as_mut().ok_or(Error::<T>::NoIdentity)?;
 				// Calculate what deposit should be
@@ -1593,19 +2097,19 @@ impl<T: Config> Pallet<T> {
 				let new_id_deposit = T::BasicDeposit::get().saturating_add(byte_deposit);
 
 				// Update account
-				Self::rejig_deposit(&target, reg.deposit, new_id_deposit)?;
+				Self::rejig_deposit(target, reg.deposit, new_id_deposit)?;
 
 				reg.deposit = new_id_deposit;
 				Ok(new_id_deposit)
 			},
 		)?;
 
-		let new_subs_deposit = if SubsOf::<T>::contains_key(&target) {
+		let new_subs_deposit = if SubsOf::<T>::contains_key(target) {
 			SubsOf::<T>::try_mutate(
-				&target,
+				target,
 				|(current_subs_deposit, subs_of)| -> Result<BalanceOf<T>, DispatchError> {
 					let new_subs_deposit = Self::subs_deposit(subs_of.len() as u32);
-					Self::rejig_deposit(&target, *current_subs_deposit, new_subs_deposit)?;
+					Self::rejig_deposit(target, *current_subs_deposit, new_subs_deposit)?;
 					*current_subs_deposit = new_subs_deposit;
 					Ok(new_subs_deposit)
 				},
@@ -1626,7 +2130,7 @@ impl<T: Config> Pallet<T> {
 		info: T::IdentityInformation,
 	) -> DispatchResult {
 		IdentityOf::<T>::insert(
-			&who,
+			who,
 			Registration {
 				judgements: Default::default(),
 				deposit: Zero::zero(),
@@ -1653,7 +2157,7 @@ impl<T: Config> Pallet<T> {
 		SubsOf::<T>::insert::<
 			&T::AccountId,
 			(BalanceOf<T>, BoundedVec<T::AccountId, T::MaxSubAccounts>),
-		>(&who, (Zero::zero(), sub_accounts));
+		>(who, (Zero::zero(), sub_accounts));
 		Ok(())
 	}
 }
