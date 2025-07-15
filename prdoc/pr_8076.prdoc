@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 title: 'Enable statement store with new CLI arg in polkadot-omni-node and polkadot-parachain'
 doc:
 - audience: Node Operator
@@ -22,3 +23,19 @@ crates:
   bump: major
 - name: people-westend-runtime
   bump: major
+=======
+title: 'Enable statement store in polkadot-omni-node and polkadot-parachain'
+doc:
+- audience: Node Operator
+  description: |-
+    This PR introduces and enables the statement store and add a new argument `disable_statement_store` in `polkadot-omni-node-lib`.
+    This takes effect in `polkadot-omni-node` and `polkadot-parachain` and any node depending on `polkadot-omni-node-lib`.
+
+    The statement store is an off-chain data-store for signed statements accessible via RPC and OCW.
+    It uses the runtime api to get the allowance associated to an account.
+
+    If the runtime doesn't implement the API `ValidateStatement` then all statement submission will safely fail with the error `Error calling into the runtime`.
+crates:
+- name: polkadot-omni-node-lib
+  bump: major
+>>>>>>> upstream/gui-statement-store-testnet-unstable
