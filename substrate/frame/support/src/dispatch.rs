@@ -121,6 +121,12 @@ impl<AccountId> RawOrigin<AccountId> {
 	}
 }
 
+impl<AccountId: Clone> crate::traits::ProvideNonce<AccountId> for RawOrigin<AccountId> {
+	fn nonce_provider(&self) -> Option<AccountId> {
+		self.as_signed().cloned()
+	}
+}
+
 /// A type that can be used as a parameter in a dispatchable function.
 ///
 /// When using `decl_module` all arguments for call functions must implement this trait.

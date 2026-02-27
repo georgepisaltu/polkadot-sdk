@@ -18,6 +18,16 @@
 use super::helper;
 use syn::spanned::Spanned;
 
+/// Per-variant nonce provider definition parsed from `#[pallet::provide_nonce(...)]`.
+pub struct OriginNonceProviderDef {
+	/// The variant identifier.
+	pub variant_ident: syn::Ident,
+	/// The fields of the variant (for generating destructure patterns).
+	pub fields: syn::Fields,
+	/// The user's closure/function expression.
+	pub expr: syn::Expr,
+}
+
 /// Definition of the pallet origin type.
 ///
 /// Either:
@@ -28,6 +38,8 @@ pub struct OriginDef {
 	pub is_generic: bool,
 	/// A set of usage of instance, must be check for consistency with trait.
 	pub instances: Vec<helper::InstanceUsage>,
+	/// Per-variant nonce provider defs. Only populated for enum origins.
+	pub nonce_providers: Vec<OriginNonceProviderDef>,
 }
 
 impl OriginDef {
@@ -63,6 +75,48 @@ impl OriginDef {
 			return Err(syn::Error::new(ident.span(), msg));
 		}
 
-		Ok(OriginDef { is_generic, instances })
+		let mut nonce_providers = vec![];
+
+		// Parse #[pallet::provide_nonce(...)] on enum variants. Only enum types are supported.
+		if let syn::Item::Enum(item_enum) = item {
+			for variant in item_enum.variants.iter_mut() {
+				let mut provide_nonce_attr = None;
+				let mut found_count = 0;
+
+				// Find and extract the provide_nonce attribute
+				variant.attrs.retain(|attr| {
+					if attr.path().segments.len() == 2 &&
+						attr.path().segments[0].ident == "pallet" &&
+						attr.path().segments[1].ident == "provide_nonce"
+					{
+						found_count += 1;
+						if provide_nonce_attr.is_none() {
+							provide_nonce_attr = Some(attr.clone());
+						}
+						false // remove from variant attrs
+					} else {
+						true
+					}
+				});
+
+				if found_count > 1 {
+					return Err(syn::Error::new(
+						variant.ident.span(),
+						"Duplicate `#[pallet::provide_nonce(...)]` attribute on variant",
+					));
+				}
+
+				if let Some(attr) = provide_nonce_attr {
+					let expr: syn::Expr = attr.parse_args()?;
+					nonce_providers.push(OriginNonceProviderDef {
+						variant_ident: variant.ident.clone(),
+						fields: variant.fields.clone(),
+						expr,
+					});
+				}
+			}
+		}
+
+		Ok(OriginDef { is_generic, instances, nonce_providers })
 	}
 }

@@ -151,6 +151,16 @@ pub enum RawOrigin<AccountId, I> {
 	_Phantom(PhantomData<I>),
 }
 
+impl<AccountId: Clone, I> frame_support::traits::ProvideNonce<AccountId>
+	for RawOrigin<AccountId, I>
+{
+	fn nonce_provider(&self) -> Option<AccountId> {
+		// TODO: Return the inner of `RawOrigin::Member` when migrating `CheckNonce` to
+		// `ProvideNonce`.
+		None
+	}
+}
+
 impl<AccountId, I> GetBacking for RawOrigin<AccountId, I> {
 	fn get_backing(&self) -> Option<Backing> {
 		match self {

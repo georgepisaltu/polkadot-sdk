@@ -476,6 +476,24 @@ pub trait CallerTrait<AccountId>: Parameter + Member + From<RawOrigin<AccountId>
 	fn is_none(&self) -> bool {
 		self.as_system_ref().map_or(false, RawOrigin::is_none)
 	}
+
+	fn nonce_provider(&self) -> Option<AccountId> {
+		None
+	}
+}
+
+/// Trait for pallet `Origin` types to provide an `AccountId` for nonce tracking.
+///
+/// For enum origins: implemented automatically by the `#[pallet]` macro. Pallet
+/// developers annotate individual enum variants with
+/// `#[pallet::provide_nonce(|fields...| -> Option<AccountId>)]`.
+///
+/// For type alias origins (e.g. `type Origin<T> = CustomOrigin<...>`): the aliased
+/// type must implement this trait. The generated code delegates to the trait impl.
+pub trait ProvideNonce<AccountId> {
+	fn nonce_provider(&self) -> Option<AccountId> {
+		None
+	}
 }
 
 /// Methods available on `frame_system::Config::RuntimeOrigin`.

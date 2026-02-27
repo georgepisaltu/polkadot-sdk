@@ -26,9 +26,12 @@ pub fn expand_outer_origin(
 	pallets: &[Pallet],
 	scrate: &TokenStream,
 ) -> syn::Result<TokenStream> {
+	let system_path = &system_pallet.path;
+
 	let mut caller_variants = TokenStream::new();
 	let mut pallet_conversions = TokenStream::new();
 	let mut query_origin_part_macros = Vec::new();
+	let mut nonce_provider_arms = TokenStream::new();
 
 	for pallet_decl in pallets.iter().filter(|pallet| pallet.name != SYSTEM_PALLET_NAME) {
 		if let Some(pallet_entry) = pallet_decl.find_part("Origin") {
@@ -64,10 +67,19 @@ pub fn expand_outer_origin(
 			query_origin_part_macros.push(quote! {
 				#path::__substrate_origin_check::is_origin_part_defined!(#name);
 			});
+
+			let attr = pallet_decl.get_attributes();
+			let pallet_type = match instance {
+				Some(inst) => quote! { #path::Pallet::<#runtime, #path::#inst> },
+				None => quote! { #path::Pallet::<#runtime> },
+			};
+			nonce_provider_arms.extend(quote! {
+				#attr
+				OriginCaller::#name(o) =>
+					#pallet_type::__provide_nonce_for_origin(o),
+			});
 		}
 	}
-
-	let system_path = &system_pallet.path;
 
 	let system_index = system_pallet.index;
 
@@ -243,6 +255,13 @@ pub fn expand_outer_origin(
 				match &self {
 					OriginCaller::system(o) => Some(o),
 					_ => None,
+				}
+			}
+			fn nonce_provider(&self) -> Option<<#runtime as #system_path::Config>::AccountId> {
+				match &self {
+					OriginCaller::system(o) => o.as_signed().cloned(),
+					#nonce_provider_arms
+					OriginCaller::Void(v) => match *v {},
 				}
 			}
 		}
