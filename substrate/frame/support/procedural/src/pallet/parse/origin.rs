@@ -24,7 +24,7 @@ pub struct OriginNonceProviderDef {
 	pub variant_ident: syn::Ident,
 	/// The fields of the variant (for generating destructure patterns).
 	pub fields: syn::Fields,
-	/// The user's closure/function expression.
+	/// The user's closure/function expression for `provide_nonce`.
 	pub expr: syn::Expr,
 }
 
@@ -81,33 +81,32 @@ impl OriginDef {
 		if let syn::Item::Enum(item_enum) = item {
 			for variant in item_enum.variants.iter_mut() {
 				let mut provide_nonce_attr = None;
-				let mut found_count = 0;
+				let mut provide_nonce_count = 0;
 
-				// Find and extract the provide_nonce attribute
+				// Find and extract the `pallet::provide_nonce` attribute
 				variant.attrs.retain(|attr| {
 					if attr.path().segments.len() == 2 &&
 						attr.path().segments[0].ident == "pallet" &&
 						attr.path().segments[1].ident == "provide_nonce"
 					{
-						found_count += 1;
+						provide_nonce_count += 1;
 						if provide_nonce_attr.is_none() {
 							provide_nonce_attr = Some(attr.clone());
 						}
-						false // remove from variant attrs
-					} else {
-						true
+						return false; // remove from variant attrs
 					}
+					true
 				});
 
-				if found_count > 1 {
+				if provide_nonce_count > 1 {
 					return Err(syn::Error::new(
 						variant.ident.span(),
 						"Duplicate `#[pallet::provide_nonce(...)]` attribute on variant",
 					));
 				}
 
-				if let Some(attr) = provide_nonce_attr {
-					let expr: syn::Expr = attr.parse_args()?;
+				if let Some(nonce_attr) = provide_nonce_attr {
+					let expr: syn::Expr = nonce_attr.parse_args()?;
 					nonce_providers.push(OriginNonceProviderDef {
 						variant_ident: variant.ident.clone(),
 						fields: variant.fields.clone(),

@@ -477,6 +477,7 @@ pub trait CallerTrait<AccountId>: Parameter + Member + From<RawOrigin<AccountId>
 		self.as_system_ref().map_or(false, RawOrigin::is_none)
 	}
 
+	/// Provide an `AccountId` for nonce tracking, if this origin has one.
 	fn nonce_provider(&self) -> Option<AccountId> {
 		None
 	}
@@ -491,6 +492,7 @@ pub trait CallerTrait<AccountId>: Parameter + Member + From<RawOrigin<AccountId>
 /// For type alias origins (e.g. `type Origin<T> = CustomOrigin<...>`): the aliased
 /// type must implement this trait. The generated code delegates to the trait impl.
 pub trait ProvideNonce<AccountId> {
+	/// Provide an `AccountId` for nonce tracking, if this origin has one.
 	fn nonce_provider(&self) -> Option<AccountId> {
 		None
 	}

@@ -17,6 +17,7 @@
 
 // `#[pallet::provide_nonce]` closure returning the wrong type.
 // Should return `Option<T::AccountId>` but returns `bool`.
+// The compiler will emit a type mismatch error.
 
 #[frame_support::pallet(dev_mode)]
 mod pallet {
