@@ -455,7 +455,9 @@ pub trait UnfilteredDispatchable {
 /// Unlike `OriginTrait` impls, this does not include any kind of dispatch/call filter. Also, this
 /// trait is more flexible in terms of how it can be used: it is a `Parameter` and `Member`, so it
 /// can be used as dispatchable parameters as well as in storage items.
-pub trait CallerTrait<AccountId>: Parameter + Member + From<RawOrigin<AccountId>> {
+pub trait CallerTrait<AccountId>:
+	Parameter + Member + From<RawOrigin<AccountId>> + ProvideNonce<AccountId>
+{
 	/// Extract the signer from the message if it is a `Signed` origin.
 	fn into_system(self) -> Option<RawOrigin<AccountId>>;
 
@@ -475,11 +477,6 @@ pub trait CallerTrait<AccountId>: Parameter + Member + From<RawOrigin<AccountId>
 	/// Returns `true` if `self` is a system `None` origin, `None` otherwise.
 	fn is_none(&self) -> bool {
 		self.as_system_ref().map_or(false, RawOrigin::is_none)
-	}
-
-	/// Provide an `AccountId` for nonce tracking, if this origin has one.
-	fn nonce_provider(&self) -> Option<AccountId> {
-		None
 	}
 }
 

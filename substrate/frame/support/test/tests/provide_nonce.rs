@@ -19,7 +19,7 @@
 
 use frame_support::{
 	derive_impl,
-	traits::{CallerTrait, ProvideNonce},
+	traits::ProvideNonce,
 };
 use sp_runtime::{generic, traits::BlakeTwo256};
 

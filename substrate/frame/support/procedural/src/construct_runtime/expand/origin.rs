@@ -244,6 +244,16 @@ pub fn expand_outer_origin(
 			}
 		}
 
+		impl #scrate::traits::ProvideNonce<<#runtime as #system_path::Config>::AccountId> for OriginCaller {
+			fn nonce_provider(&self) -> Option<<#runtime as #system_path::Config>::AccountId> {
+				match &self {
+					OriginCaller::system(o) => o.as_signed().cloned(),
+					#nonce_provider_arms
+					OriginCaller::Void(v) => match *v {},
+				}
+			}
+		}
+
 		impl #scrate::traits::CallerTrait<<#runtime as #system_path::Config>::AccountId> for OriginCaller {
 			fn into_system(self) -> Option<#system_path::RawOrigin<<#runtime as #system_path::Config>::AccountId>> {
 				match self {
@@ -255,13 +265,6 @@ pub fn expand_outer_origin(
 				match &self {
 					OriginCaller::system(o) => Some(o),
 					_ => None,
-				}
-			}
-			fn nonce_provider(&self) -> Option<<#runtime as #system_path::Config>::AccountId> {
-				match &self {
-					OriginCaller::system(o) => o.as_signed().cloned(),
-					#nonce_provider_arms
-					OriginCaller::Void(v) => match *v {},
 				}
 			}
 		}
