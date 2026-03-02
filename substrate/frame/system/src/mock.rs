@@ -21,10 +21,41 @@ use sp_runtime::{type_with_default::TypeWithDefault, BuildStorage, Perbill};
 
 type Block = mocking::MockBlock<Test>;
 
+#[frame_support::pallet(dev_mode)]
+pub mod pallet_with_custom_origin {
+	use crate as frame_system;
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
+
+	#[pallet::pallet]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	pub trait Config: frame_system::Config {}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
+			Ok(())
+		}
+	}
+
+	#[pallet::origin]
+	#[derive(
+		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
+	)]
+	pub enum Origin<T: Config> {
+		#[pallet::provide_nonce(|who| Some(who.clone()))]
+		Member(T::AccountId),
+		Council,
+	}
+}
+
 frame_support::construct_runtime!(
 	pub enum Test
 	{
 		System: frame_system,
+		PalletWithCustomOrigin: pallet_with_custom_origin,
 	}
 );
 
@@ -102,6 +133,8 @@ impl Config for Test {
 	type MultiBlockMigrator = MockedMigrator;
 	type Nonce = TypeWithDefault<u64, DefaultNonceProvider>;
 }
+
+impl pallet_with_custom_origin::Config for Test {}
 
 parameter_types! {
 	pub static Ongoing: bool = false;
