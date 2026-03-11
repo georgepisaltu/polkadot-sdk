@@ -15,9 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// `#[pallet::provide_nonce]` closure returning the wrong type.
-// Should return `Option<T::AccountId>` but returns `bool`.
-// The compiler will emit a type mismatch error.
+// `#[pallet::fee_payer]` without `#[pallet::as_account(...)]` should fail.
 
 #[frame_support::pallet(dev_mode)]
 mod pallet {
@@ -38,7 +36,7 @@ mod pallet {
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
 	pub enum Origin<T: Config> {
-		#[pallet::provide_nonce(|_who| true)]
+		#[pallet::fee_payer]
 		Member(T::AccountId),
 	}
 }

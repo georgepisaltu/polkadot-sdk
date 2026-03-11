@@ -456,7 +456,7 @@ pub trait UnfilteredDispatchable {
 /// trait is more flexible in terms of how it can be used: it is a `Parameter` and `Member`, so it
 /// can be used as dispatchable parameters as well as in storage items.
 pub trait CallerTrait<AccountId>:
-	Parameter + Member + From<RawOrigin<AccountId>> + ProvideNonce<AccountId>
+	Parameter + Member + From<RawOrigin<AccountId>> + AccountLike<AccountId>
 {
 	/// Extract the signer from the message if it is a `Signed` origin.
 	fn into_system(self) -> Option<RawOrigin<AccountId>>;
@@ -480,17 +480,31 @@ pub trait CallerTrait<AccountId>:
 	}
 }
 
-/// Trait for pallet `Origin` types to provide an `AccountId` for nonce tracking.
+/// Trait for pallet `Origin` types that represent account-like entities.
+///
+/// Origins that are "like accounts" can expose an account (`as_account`), and
+/// independently opt into being nonce providers and/or fee payers.
 ///
 /// For enum origins: implemented automatically by the `#[pallet]` macro. Pallet
 /// developers annotate individual enum variants with
-/// `#[pallet::provide_nonce(|fields...| -> Option<AccountId>)]`.
+/// `#[pallet::as_account(|fields...| -> Option<AccountId>)]` and optionally
+/// `#[pallet::nonce_provider]` and/or `#[pallet::fee_payer]` flags.
 ///
 /// For type alias origins (e.g. `type Origin<T> = CustomOrigin<...>`): the aliased
 /// type must implement this trait. The generated code delegates to the trait impl.
-pub trait ProvideNonce<AccountId> {
-	/// Provide an `AccountId` for nonce tracking, if this origin has one.
+pub trait AccountLike<AccountId> {
+	/// Return the `AccountId` this origin maps to, if any.
+	fn as_account(&self) -> Option<AccountId> {
+		None
+	}
+
+	/// Return the `AccountId` to use for nonce tracking, if this origin participates.
 	fn nonce_provider(&self) -> Option<AccountId> {
+		None
+	}
+
+	/// Return the `AccountId` to charge fees from, if this origin participates.
+	fn fee_payer(&self) -> Option<AccountId> {
 		None
 	}
 }

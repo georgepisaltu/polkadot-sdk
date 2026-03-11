@@ -15,9 +15,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Type alias origin where the aliased type does NOT implement `ProvideNonce`.
-// This should fail to compile because the generated code delegates to
-// `ProvideNonce::nonce_provider` on the aliased type.
+// Type alias origin where the aliased type implements `AccountLike`.
+// This should compile successfully - the generated code delegates to the trait impl.
 
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
@@ -47,7 +46,16 @@ pub mod pallet {
 		Root,
 	}
 
-	// Note: no ProvideNonce impl for CustomOrigin — should fail to compile.
+	impl<AccountId: Clone> frame_support::traits::AccountLike<AccountId>
+		for CustomOrigin<AccountId>
+	{
+		fn as_account(&self) -> Option<AccountId> {
+			match self {
+				CustomOrigin::Admin(who) => Some(who.clone()),
+				CustomOrigin::Root => None,
+			}
+		}
+	}
 
 	#[pallet::origin]
 	pub type Origin<T> = CustomOrigin<<T as frame_system::Config>::AccountId>;

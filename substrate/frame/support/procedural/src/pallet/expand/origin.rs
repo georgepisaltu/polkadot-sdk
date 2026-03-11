@@ -20,7 +20,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{spanned::Spanned, Ident};
 
-/// expand the `is_origin_part_defined` macro and the `ProvideNonce` impl.
+/// expand the `is_origin_part_defined` macro and the `AccountLike` impl.
 pub fn expand_origin(def: &mut Def) -> TokenStream {
 	let count = COUNTER.with(|counter| counter.borrow_mut().inc());
 	let macro_ident = Ident::new(&format!("__is_origin_part_defined_{}", count), def.item.span());
@@ -38,7 +38,7 @@ pub fn expand_origin(def: &mut Def) -> TokenStream {
 		TokenStream::new()
 	};
 
-	let provide_nonce_impl = generate_provide_nonce_impl(def);
+	let account_like_impl = generate_account_like_impl(def);
 
 	quote! {
 		#[doc(hidden)]
@@ -55,11 +55,11 @@ pub fn expand_origin(def: &mut Def) -> TokenStream {
 			pub use #macro_ident as is_origin_part_defined;
 		}
 
-		#provide_nonce_impl
+		#account_like_impl
 	}
 }
 
-fn generate_provide_nonce_impl(def: &Def) -> TokenStream {
+fn generate_account_like_impl(def: &Def) -> TokenStream {
 	let origin_def = match &def.origin {
 		Some(o) => o,
 		None => return TokenStream::new(),
@@ -69,14 +69,7 @@ fn generate_provide_nonce_impl(def: &Def) -> TokenStream {
 	let frame_system = &def.frame_system;
 	let span = def.item.span();
 
-	// Type alias origins (e.g. in pallet-collective `type Origin<T, I> = RawOrigin<AccountId, I>`):
-	// cannot have `#[pallet::provide_nonce]` attributes on variants, so instead we delegate to the
-	// `ProvideNonce` trait impl on the aliased type. The aliased type must implement
-	// `ProvideNonce<AccountId>`.
-	//
-	// TODO: pallet_collective's `RawOrigin` needs to be refactored to not be a type alias origin
-	// but instead be a proper enum origin. This is relevant because the `Member` variant has an
-	// account which can be a nonce provider.
+	// Type alias origins: delegate to the `AccountLike` trait impl on the aliased type.
 	let is_type_alias = def
 		.item
 		.content
@@ -99,14 +92,36 @@ fn generate_provide_nonce_impl(def: &Def) -> TokenStream {
 		return quote! {
 			impl<#type_impl_gen> Pallet<#type_use_gen> #where_clause {
 				#[doc(hidden)]
-				pub fn __provide_nonce_for_origin(
+				pub fn __as_account_for_origin(
 					origin: &Origin<#type_use_gen>,
 				) -> Option<<T as #frame_system::Config>::AccountId> {
 					<Origin<#type_use_gen> as
-						#frame_support::traits::ProvideNonce<
+						#frame_support::traits::AccountLike<
+							<T as #frame_system::Config>::AccountId
+						>
+					>::as_account(origin)
+				}
+
+				#[doc(hidden)]
+				pub fn __nonce_provider_for_origin(
+					origin: &Origin<#type_use_gen>,
+				) -> Option<<T as #frame_system::Config>::AccountId> {
+					<Origin<#type_use_gen> as
+						#frame_support::traits::AccountLike<
 							<T as #frame_system::Config>::AccountId
 						>
 					>::nonce_provider(origin)
+				}
+
+				#[doc(hidden)]
+				pub fn __fee_payer_for_origin(
+					origin: &Origin<#type_use_gen>,
+				) -> Option<<T as #frame_system::Config>::AccountId> {
+					<Origin<#type_use_gen> as
+						#frame_support::traits::AccountLike<
+							<T as #frame_system::Config>::AccountId
+						>
+					>::fee_payer(origin)
 				}
 			}
 		};
@@ -116,29 +131,31 @@ fn generate_provide_nonce_impl(def: &Def) -> TokenStream {
 	let type_use_gen = &def.type_use_generics(span);
 	let where_clause = &def.config.where_clause;
 
-	// The origin type reference for the __provide_nonce_for_origin method parameter.
+	// The origin type reference for method parameters.
 	let origin_type_ref = if origin_def.is_generic {
 		quote! { &Origin<#type_use_gen> }
 	} else {
 		quote! { &Origin }
 	};
 
-	// Generate getter functions and match arms for nonce_providers.
+	// Generate getter functions and match arms for account_like_defs.
 	let mut getter_fns = TokenStream::new();
-	let mut match_arms = TokenStream::new();
+	let mut as_account_match_arms = TokenStream::new();
+	let mut nonce_provider_match_arms = TokenStream::new();
+	let mut fee_payer_match_arms = TokenStream::new();
 
-	for np in &origin_def.nonce_providers {
-		let variant_ident = &np.variant_ident;
-		let expr = &np.expr;
+	for al in &origin_def.account_like_defs {
+		let variant_ident = &al.variant_ident;
+		let expr = &al.expr;
 
 		let getter_name =
-			Ident::new(&format!("__provide_nonce_for_{}", variant_ident), variant_ident.span());
+			Ident::new(&format!("__as_account_for_{}", variant_ident), variant_ident.span());
 
-		let field_types: Vec<_> = np.fields.iter().map(|f| &f.ty).collect();
-		let field_bindings: Vec<_> = (0..np.fields.len())
+		let field_types: Vec<_> = al.fields.iter().map(|f| &f.ty).collect();
+		let field_bindings: Vec<_> = (0..al.fields.len())
 			.map(|i| Ident::new(&format!("field_{}", i), variant_ident.span()))
 			.collect();
-		let destructure = build_destructure_pattern(&np.fields, &field_bindings);
+		let destructure = build_destructure_pattern(&al.fields, &field_bindings);
 
 		// Getter function on Pallet<T> — gives closures access to Self and T::AccountId.
 		getter_fns.extend(quote::quote_spanned!(expr.span() =>
@@ -153,74 +170,163 @@ fn generate_provide_nonce_impl(def: &Def) -> TokenStream {
 			}
 		));
 
-		match_arms.extend(quote! {
+		// as_account: all variants with #[pallet::as_account(...)]
+		as_account_match_arms.extend(quote! {
 			Origin::#variant_ident #destructure => {
 				let f = Pallet::<#type_use_gen>::#getter_name();
 				f(#( #field_bindings ),*)
 			},
 		});
+
+		// nonce_provider: only variants with #[pallet::nonce_provider]
+		if al.is_nonce_provider {
+			nonce_provider_match_arms.extend(quote! {
+				Origin::#variant_ident #destructure => {
+					let f = Pallet::<#type_use_gen>::#getter_name();
+					f(#( #field_bindings ),*)
+				},
+			});
+		}
+
+		// fee_payer: only variants with #[pallet::fee_payer]
+		if al.is_fee_payer {
+			fee_payer_match_arms.extend(quote! {
+				Origin::#variant_ident #destructure => {
+					let f = Pallet::<#type_use_gen>::#getter_name();
+					f(#( #field_bindings ),*)
+				},
+			});
+		}
 	}
 
-	// Generate the __provide_nonce_for_origin method on Pallet<T>.
-	// construct_runtime delegates to this for all pallet origins.
-	let method_body = if origin_def.nonce_providers.is_empty() {
-		quote! { None }
-	} else {
+	// Generate method bodies for each of the three methods.
+	let has_as_account = !origin_def.account_like_defs.is_empty();
+	let has_nonce_providers = origin_def.account_like_defs.iter().any(|al| al.is_nonce_provider);
+	let has_fee_payers = origin_def.account_like_defs.iter().any(|al| al.is_fee_payer);
+
+	let as_account_body = if has_as_account {
 		quote! {
 			match origin {
-				#match_arms
+				#as_account_match_arms
 				_ => None,
 			}
 		}
+	} else {
+		quote! { None }
 	};
 
-	let underscore_prefix = if origin_def.nonce_providers.is_empty() { "_" } else { "" };
-	let origin_param = Ident::new(&format!("{}origin", underscore_prefix), span);
+	let nonce_provider_body = if has_nonce_providers {
+		quote! {
+			match origin {
+				#nonce_provider_match_arms
+				_ => None,
+			}
+		}
+	} else {
+		quote! { None }
+	};
 
-	let pallet_method = quote! {
+	let fee_payer_body = if has_fee_payers {
+		quote! {
+			match origin {
+				#fee_payer_match_arms
+				_ => None,
+			}
+		}
+	} else {
+		quote! { None }
+	};
+
+	let as_account_param = if has_as_account {
+		Ident::new("origin", span)
+	} else {
+		Ident::new("_origin", span)
+	};
+	let nonce_provider_param = if has_nonce_providers {
+		Ident::new("origin", span)
+	} else {
+		Ident::new("_origin", span)
+	};
+	let fee_payer_param = if has_fee_payers {
+		Ident::new("origin", span)
+	} else {
+		Ident::new("_origin", span)
+	};
+
+	let pallet_methods = quote! {
 		#getter_fns
 
 		impl<#type_impl_gen> Pallet<#type_use_gen> #where_clause {
 			#[doc(hidden)]
-			pub fn __provide_nonce_for_origin(
-				#origin_param: #origin_type_ref,
+			pub fn __as_account_for_origin(
+				#as_account_param: #origin_type_ref,
 			) -> Option<<T as #frame_system::Config>::AccountId> {
-				#method_body
+				#as_account_body
+			}
+
+			#[doc(hidden)]
+			pub fn __nonce_provider_for_origin(
+				#nonce_provider_param: #origin_type_ref,
+			) -> Option<<T as #frame_system::Config>::AccountId> {
+				#nonce_provider_body
+			}
+
+			#[doc(hidden)]
+			pub fn __fee_payer_for_origin(
+				#fee_payer_param: #origin_type_ref,
+			) -> Option<<T as #frame_system::Config>::AccountId> {
+				#fee_payer_body
 			}
 		}
 	};
 
-	// Generate ProvideNonce trait impl.
-	// For generic origins: delegate to the Pallet method (or default if no providers).
-	// For non-generic origins: blanket impl returning None (the Pallet method is the
-	// real implementation, reachable through CallerTrait::nonce_provider via
-	// construct_runtime).
+	// Generate AccountLike trait impl.
 	let trait_impl = if origin_def.is_generic {
-		if origin_def.nonce_providers.is_empty() {
+		let as_account_method = if has_as_account {
 			quote! {
-				impl<#type_impl_gen> #frame_support::traits::ProvideNonce<
-					<T as #frame_system::Config>::AccountId
-				> for Origin<#type_use_gen> #where_clause {}
+				fn as_account(&self) -> Option<<T as #frame_system::Config>::AccountId> {
+					Pallet::<#type_use_gen>::__as_account_for_origin(self)
+				}
 			}
 		} else {
+			TokenStream::new()
+		};
+		let nonce_provider_method = if has_nonce_providers {
 			quote! {
-				impl<#type_impl_gen> #frame_support::traits::ProvideNonce<
-					<T as #frame_system::Config>::AccountId
-				> for Origin<#type_use_gen> #where_clause {
-					fn nonce_provider(&self) -> Option<<T as #frame_system::Config>::AccountId> {
-						Pallet::<#type_use_gen>::__provide_nonce_for_origin(self)
-					}
+				fn nonce_provider(&self) -> Option<<T as #frame_system::Config>::AccountId> {
+					Pallet::<#type_use_gen>::__nonce_provider_for_origin(self)
 				}
+			}
+		} else {
+			TokenStream::new()
+		};
+		let fee_payer_method = if has_fee_payers {
+			quote! {
+				fn fee_payer(&self) -> Option<<T as #frame_system::Config>::AccountId> {
+					Pallet::<#type_use_gen>::__fee_payer_for_origin(self)
+				}
+			}
+		} else {
+			TokenStream::new()
+		};
+
+		quote! {
+			impl<#type_impl_gen> #frame_support::traits::AccountLike<
+				<T as #frame_system::Config>::AccountId
+			> for Origin<#type_use_gen> #where_clause {
+				#as_account_method
+				#nonce_provider_method
+				#fee_payer_method
 			}
 		}
 	} else {
 		quote! {
-			impl<AccountId> #frame_support::traits::ProvideNonce<AccountId> for Origin {}
+			impl<AccountId> #frame_support::traits::AccountLike<AccountId> for Origin {}
 		}
 	};
 
 	quote! {
-		#pallet_method
+		#pallet_methods
 		#trait_impl
 	}
 }

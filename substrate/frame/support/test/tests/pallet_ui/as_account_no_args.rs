@@ -15,7 +15,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Two `#[pallet::provide_nonce(...)]` on the same variant should produce a duplicate error.
+// `#[pallet::as_account]` without parenthesized arguments should fail.
+// The attribute requires a closure or function expression.
 
 #[frame_support::pallet(dev_mode)]
 mod pallet {
@@ -36,8 +37,7 @@ mod pallet {
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
 	pub enum Origin<T: Config> {
-		#[pallet::provide_nonce(|who| Some(who.clone()))]
-		#[pallet::provide_nonce(|who| Some(who.clone()))]
+		#[pallet::as_account]
 		Member(T::AccountId),
 	}
 }

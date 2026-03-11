@@ -15,30 +15,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// `#[pallet::provide_nonce(...)]` on a struct origin should fail, because
-// the attribute is stripped during enum variant processing and a struct has no variants.
-// Instead this should produce a syn parse error about unknown attribute.
+// Verify a non-generic enum origin with `#[pallet::as_account]` compiles.
+// The closure accesses `Self` (= `Pallet<T>`) to convert concrete fields to AccountId.
+
+use frame_support::pallet_prelude::*;
+use frame_system::pallet_prelude::*;
 
 #[frame_support::pallet(dev_mode)]
-mod pallet {
-	use frame_support::pallet_prelude::*;
-	use frame_system::pallet_prelude::*;
+pub mod pallet {
+	use super::*;
 
 	#[pallet::pallet]
-	pub struct Pallet<T>(_);
+	pub struct Pallet<T>(core::marker::PhantomData<T>);
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {}
 
+	#[pallet::storage]
+	pub type CouncilAccounts<T: Config> = StorageMap<_, Twox64Concat, u32, T::AccountId>;
+
 	#[pallet::call]
-	impl<T: Config> Pallet<T> {}
+	impl<T: Config> Pallet<T> {
+		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
+			Ok(())
+		}
+	}
+
+	impl<T: Config> Pallet<T> {
+		pub fn account_for_council(id: &u32) -> Option<T::AccountId> {
+			CouncilAccounts::<T>::get(id)
+		}
+	}
 
 	#[pallet::origin]
 	#[derive(
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
-	#[pallet::provide_nonce(|_| None)]
-	pub struct Origin<T>(pub PhantomData<T>);
+	pub enum Origin {
+		#[pallet::as_account(|id| Self::account_for_council(id))]
+		Council(u32),
+		Admin,
+	}
 }
 
 fn main() {}

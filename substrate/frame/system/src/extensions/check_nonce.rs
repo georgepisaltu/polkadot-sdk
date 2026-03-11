@@ -23,7 +23,7 @@ use crate::Config;
 use codec::{Decode, DecodeWithMemTracking, Encode};
 use frame_support::{dispatch::DispatchInfo, pallet_prelude::TransactionSource, DebugNoBound};
 use scale_info::TypeInfo;
-use frame_support::traits::{OriginTrait, ProvideNonce};
+use frame_support::traits::{AccountLike, OriginTrait};
 use sp_runtime::{
 	traits::{
 		CheckedAdd, DispatchInfoOf, Dispatchable, One, PostDispatchInfoOf, TransactionExtension,

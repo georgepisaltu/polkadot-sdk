@@ -45,7 +45,8 @@ pub mod pallet_with_custom_origin {
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
 	pub enum Origin<T: Config> {
-		#[pallet::provide_nonce(|who| Some(who.clone()))]
+		#[pallet::as_account(|who| Some(who.clone()))]
+		#[pallet::nonce_provider]
 		Member(T::AccountId),
 		Council,
 	}

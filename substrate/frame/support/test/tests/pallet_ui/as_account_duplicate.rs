@@ -15,36 +15,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Verify a basic pallet with `#[pallet::provide_nonce]` compiles successfully.
-
-use frame_support::pallet_prelude::*;
-use frame_system::pallet_prelude::*;
+// Two `#[pallet::as_account(...)]` on the same variant should produce a duplicate error.
 
 #[frame_support::pallet(dev_mode)]
-pub mod pallet {
-	use super::*;
+mod pallet {
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
 
 	#[pallet::pallet]
-	pub struct Pallet<T>(core::marker::PhantomData<T>);
+	pub struct Pallet<T>(_);
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {}
 
 	#[pallet::call]
-	impl<T: Config> Pallet<T> {
-		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
-			Ok(())
-		}
-	}
+	impl<T: Config> Pallet<T> {}
 
 	#[pallet::origin]
 	#[derive(
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
 	pub enum Origin<T: Config> {
-		#[pallet::provide_nonce(|who| Some(who.clone()))]
+		#[pallet::as_account(|who| Some(who.clone()))]
+		#[pallet::as_account(|who| Some(who.clone()))]
 		Member(T::AccountId),
-		Admin,
 	}
 }
 

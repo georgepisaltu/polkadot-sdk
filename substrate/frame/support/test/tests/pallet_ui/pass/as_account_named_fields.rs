@@ -15,8 +15,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Type alias origin where the aliased type implements `ProvideNonce`.
-// This should compile successfully — the generated code delegates to the trait impl.
+// Verify `#[pallet::as_account]` on a named-fields variant (struct-like) compiles successfully.
+// The closure receives references to each named field.
 
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
@@ -38,27 +38,15 @@ pub mod pallet {
 		}
 	}
 
+	#[pallet::origin]
 	#[derive(
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
-	pub enum CustomOrigin<AccountId> {
-		Admin(AccountId),
-		Root,
+	pub enum Origin<T: Config> {
+		#[pallet::as_account(|who, _rank| Some(who.clone()))]
+		Member { who: T::AccountId, rank: u32 },
+		Admin,
 	}
-
-	impl<AccountId: Clone> frame_support::traits::ProvideNonce<AccountId>
-		for CustomOrigin<AccountId>
-	{
-		fn nonce_provider(&self) -> Option<AccountId> {
-			match self {
-				CustomOrigin::Admin(who) => Some(who.clone()),
-				CustomOrigin::Root => None,
-			}
-		}
-	}
-
-	#[pallet::origin]
-	pub type Origin<T> = CustomOrigin<<T as frame_system::Config>::AccountId>;
 }
 
 fn main() {}

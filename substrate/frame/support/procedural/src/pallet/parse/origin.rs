@@ -18,14 +18,19 @@
 use super::helper;
 use syn::spanned::Spanned;
 
-/// Per-variant nonce provider definition parsed from `#[pallet::provide_nonce(...)]`.
-pub struct OriginNonceProviderDef {
+/// Per-variant account-like definition parsed from `#[pallet::as_account(...)]`
+/// and optional `#[pallet::nonce_provider]` / `#[pallet::fee_payer]` flags.
+pub struct OriginAccountLikeDef {
 	/// The variant identifier.
 	pub variant_ident: syn::Ident,
 	/// The fields of the variant (for generating destructure patterns).
 	pub fields: syn::Fields,
-	/// The user's closure/function expression for `provide_nonce`.
+	/// The user's closure/function expression for `as_account`.
 	pub expr: syn::Expr,
+	/// Whether this variant also has `#[pallet::nonce_provider]`.
+	pub is_nonce_provider: bool,
+	/// Whether this variant also has `#[pallet::fee_payer]`.
+	pub is_fee_payer: bool,
 }
 
 /// Definition of the pallet origin type.
@@ -38,8 +43,8 @@ pub struct OriginDef {
 	pub is_generic: bool,
 	/// A set of usage of instance, must be check for consistency with trait.
 	pub instances: Vec<helper::InstanceUsage>,
-	/// Per-variant nonce provider defs. Only populated for enum origins.
-	pub nonce_providers: Vec<OriginNonceProviderDef>,
+	/// Per-variant account-like defs. Only populated for enum origins.
+	pub account_like_defs: Vec<OriginAccountLikeDef>,
 }
 
 impl OriginDef {
@@ -75,47 +80,83 @@ impl OriginDef {
 			return Err(syn::Error::new(ident.span(), msg));
 		}
 
-		let mut nonce_providers = vec![];
+		let mut account_like_defs = vec![];
 
-		// Parse #[pallet::provide_nonce(...)] on enum variants. Only enum types are supported.
+		// Parse #[pallet::as_account(...)], #[pallet::nonce_provider], #[pallet::fee_payer]
+		// on enum variants. Only enum types are supported.
 		if let syn::Item::Enum(item_enum) = item {
 			for variant in item_enum.variants.iter_mut() {
-				let mut provide_nonce_attr = None;
-				let mut provide_nonce_count = 0;
+				let mut as_account_attr = None;
+				let mut as_account_count = 0;
+				let mut has_nonce_provider = false;
+				let mut has_fee_payer = false;
+				let mut nonce_provider_span = None;
+				let mut fee_payer_span = None;
 
-				// Find and extract the `pallet::provide_nonce` attribute
+				// Find and extract the pallet attributes
 				variant.attrs.retain(|attr| {
 					if attr.path().segments.len() == 2 &&
-						attr.path().segments[0].ident == "pallet" &&
-						attr.path().segments[1].ident == "provide_nonce"
+						attr.path().segments[0].ident == "pallet"
 					{
-						provide_nonce_count += 1;
-						if provide_nonce_attr.is_none() {
-							provide_nonce_attr = Some(attr.clone());
+						let attr_name = attr.path().segments[1].ident.to_string();
+						match attr_name.as_str() {
+							"as_account" => {
+								as_account_count += 1;
+								if as_account_attr.is_none() {
+									as_account_attr = Some(attr.clone());
+								}
+								return false; // remove from variant attrs
+							},
+							"nonce_provider" => {
+								has_nonce_provider = true;
+								nonce_provider_span = Some(attr.span());
+								return false;
+							},
+							"fee_payer" => {
+								has_fee_payer = true;
+								fee_payer_span = Some(attr.span());
+								return false;
+							},
+							_ => {},
 						}
-						return false; // remove from variant attrs
 					}
 					true
 				});
 
-				if provide_nonce_count > 1 {
+				if as_account_count > 1 {
 					return Err(syn::Error::new(
 						variant.ident.span(),
-						"Duplicate `#[pallet::provide_nonce(...)]` attribute on variant",
+						"Duplicate `#[pallet::as_account(...)]` attribute on variant",
 					));
 				}
 
-				if let Some(nonce_attr) = provide_nonce_attr {
-					let expr: syn::Expr = nonce_attr.parse_args()?;
-					nonce_providers.push(OriginNonceProviderDef {
+				// Validate: nonce_provider/fee_payer require as_account
+				if has_nonce_provider && as_account_attr.is_none() {
+					return Err(syn::Error::new(
+						nonce_provider_span.unwrap(),
+						"`#[pallet::nonce_provider]` requires `#[pallet::as_account(...)]` on the same variant",
+					));
+				}
+				if has_fee_payer && as_account_attr.is_none() {
+					return Err(syn::Error::new(
+						fee_payer_span.unwrap(),
+						"`#[pallet::fee_payer]` requires `#[pallet::as_account(...)]` on the same variant",
+					));
+				}
+
+				if let Some(account_attr) = as_account_attr {
+					let expr: syn::Expr = account_attr.parse_args()?;
+					account_like_defs.push(OriginAccountLikeDef {
 						variant_ident: variant.ident.clone(),
 						fields: variant.fields.clone(),
 						expr,
+						is_nonce_provider: has_nonce_provider,
+						is_fee_payer: has_fee_payer,
 					});
 				}
 			}
 		}
 
-		Ok(OriginDef { is_generic, instances, nonce_providers })
+		Ok(OriginDef { is_generic, instances, account_like_defs })
 	}
 }

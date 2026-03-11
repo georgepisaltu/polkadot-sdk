@@ -151,13 +151,14 @@ pub enum RawOrigin<AccountId, I> {
 	_Phantom(PhantomData<I>),
 }
 
-impl<AccountId: Clone, I> frame_support::traits::ProvideNonce<AccountId>
+impl<AccountId: Clone, I> frame_support::traits::AccountLike<AccountId>
 	for RawOrigin<AccountId, I>
 {
-	fn nonce_provider(&self) -> Option<AccountId> {
-		// TODO: Return the inner of `RawOrigin::Member` when migrating `CheckNonce` to
-		// `ProvideNonce`.
-		None
+	fn as_account(&self) -> Option<AccountId> {
+		match self {
+			RawOrigin::Member(who) => Some(who.clone()),
+			_ => None,
+		}
 	}
 }
 

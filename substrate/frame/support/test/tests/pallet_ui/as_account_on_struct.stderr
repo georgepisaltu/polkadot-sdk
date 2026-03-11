@@ -1,11 +1,11 @@
 error[E0433]: failed to resolve: use of unresolved module or unlinked crate `pallet`
-  --> tests/pallet_ui/provide_nonce_on_struct.rs:40:4
+  --> tests/pallet_ui/as_account_on_struct.rs:40:4
    |
-40 |     #[pallet::provide_nonce(|_| None)]
+40 |     #[pallet::as_account(|_| None)]
    |       ^^^^^^ use of unresolved module or unlinked crate `pallet`
 
 error: unused import: `frame_system::pallet_prelude::*`
-  --> tests/pallet_ui/provide_nonce_on_struct.rs:25:6
+  --> tests/pallet_ui/as_account_on_struct.rs:25:6
    |
 25 |     use frame_system::pallet_prelude::*;
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

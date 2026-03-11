@@ -15,8 +15,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// `#[pallet::provide_nonce]` closure with wrong number of arguments for the variant fields.
-// The variant has 2 fields but the closure takes 1 argument.
+// `#[pallet::as_account]` closure with too many arguments for a unit variant.
+// The variant has 0 fields but the closure takes 1 argument.
 
 #[frame_support::pallet(dev_mode)]
 mod pallet {
@@ -37,8 +37,8 @@ mod pallet {
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
 	pub enum Origin<T: Config> {
-		#[pallet::provide_nonce(|who| Some(who.clone()))]
-		WithData(T::AccountId, u32),
+		#[pallet::as_account(|x| None)]
+		Admin,
 	}
 }
 

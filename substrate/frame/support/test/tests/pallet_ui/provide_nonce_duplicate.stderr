@@ -1,5 +1,0 @@
-error: Duplicate `#[pallet::provide_nonce(...)]` attribute on variant
-  --> tests/pallet_ui/provide_nonce_duplicate.rs:41:3
-   |
-41 |         Member(T::AccountId),
-   |         ^^^^^^

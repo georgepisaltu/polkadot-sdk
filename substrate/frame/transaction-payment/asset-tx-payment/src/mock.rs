@@ -35,6 +35,40 @@ type Block = frame_system::mocking::MockBlock<Runtime>;
 type Balance = u64;
 type AccountId = u64;
 
+/// A minimal pallet with a custom origin that has `fee_payer` on some variants.
+#[frame_support::pallet(dev_mode)]
+pub mod pallet_with_custom_origin {
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
+
+	#[pallet::pallet]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	pub trait Config: frame_system::Config {}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
+			Ok(())
+		}
+	}
+
+	#[pallet::origin]
+	#[derive(
+		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
+	)]
+	pub enum Origin<T: Config> {
+		/// A member that pays fees (has both as_account and fee_payer).
+		#[pallet::as_account(|who| Some(who.clone()))]
+		#[pallet::fee_payer]
+		FeePayer(T::AccountId),
+		/// A member that does NOT pay fees (has as_account but not fee_payer).
+		#[pallet::as_account(|who| Some(who.clone()))]
+		NonFeePayer(T::AccountId),
+	}
+}
+
 frame_support::construct_runtime!(
 	pub enum Runtime {
 		System: system,
@@ -43,6 +77,7 @@ frame_support::construct_runtime!(
 		Assets: pallet_assets,
 		Authorship: pallet_authorship,
 		AssetTxPayment: pallet_asset_tx_payment,
+		CustomOriginPallet: pallet_with_custom_origin,
 	}
 );
 
@@ -194,6 +229,8 @@ impl WeightInfo for MockWeights {
 		Weight::from_parts(20, 0)
 	}
 }
+
+impl pallet_with_custom_origin::Config for Runtime {}
 
 impl Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;

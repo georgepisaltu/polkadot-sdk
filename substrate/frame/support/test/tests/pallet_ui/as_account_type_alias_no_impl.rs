@@ -15,8 +15,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Verify a non-generic enum origin with `#[pallet::provide_nonce]` compiles.
-// The closure accesses `Self` (= `Pallet<T>`) to convert concrete fields to AccountId.
+// Type alias origin where the aliased type does NOT implement `AccountLike`.
+// This should fail to compile because the generated code delegates to
+// `AccountLike::nonce_provider` on the aliased type.
 
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
@@ -31,9 +32,6 @@ pub mod pallet {
 	#[pallet::config]
 	pub trait Config: frame_system::Config {}
 
-	#[pallet::storage]
-	pub type CouncilAccounts<T: Config> = StorageMap<_, Twox64Concat, u32, T::AccountId>;
-
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
@@ -41,21 +39,18 @@ pub mod pallet {
 		}
 	}
 
-	impl<T: Config> Pallet<T> {
-		pub fn account_for_council(id: &u32) -> Option<T::AccountId> {
-			CouncilAccounts::<T>::get(id)
-		}
-	}
-
-	#[pallet::origin]
 	#[derive(
 		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
 	)]
-	pub enum Origin {
-		#[pallet::provide_nonce(|id| Self::account_for_council(id))]
-		Council(u32),
-		Admin,
+	pub enum CustomOrigin<AccountId> {
+		Admin(AccountId),
+		Root,
 	}
+
+	// Note: no AccountLike impl for CustomOrigin — should fail to compile.
+
+	#[pallet::origin]
+	pub type Origin<T> = CustomOrigin<<T as frame_system::Config>::AccountId>;
 }
 
 fn main() {}
