@@ -446,11 +446,11 @@ mod tests {
 	}
 
 	fn custom_origin_member(who: u64) -> <Test as Config>::RuntimeOrigin {
-		crate::mock::pallet_with_custom_origin::Origin::<Test>::Member(who).into()
+		crate::mocking::pallet_with_custom_origin::Origin::<Test>::Member(who).into()
 	}
 
 	fn custom_origin_council() -> <Test as Config>::RuntimeOrigin {
-		crate::mock::pallet_with_custom_origin::Origin::<Test>::Council.into()
+		crate::mocking::pallet_with_custom_origin::Origin::<Test>::Council.into()
 	}
 
 	#[test]

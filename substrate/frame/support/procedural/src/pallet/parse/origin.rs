@@ -157,6 +157,38 @@ impl OriginDef {
 			}
 		}
 
+		// Reject `pallet::as_account`, `pallet::nonce_provider`, and `pallet::fee_payer`
+		// on non-enum origins (structs and type aliases).
+		if !matches!(item, syn::Item::Enum(_)) {
+			let check_attrs = |attrs: &[syn::Attribute]| -> syn::Result<()> {
+				for attr in attrs {
+					if attr.path().segments.len() == 2 &&
+						attr.path().segments[0].ident == "pallet"
+					{
+						let attr_name = attr.path().segments[1].ident.to_string();
+						if matches!(
+							attr_name.as_str(),
+							"as_account" | "nonce_provider" | "fee_payer"
+						) {
+							return Err(syn::Error::new(
+								attr.span(),
+								format!(
+									"`#[pallet::{}]` is only supported on enum origin variants",
+									attr_name,
+								),
+							));
+						}
+					}
+				}
+				Ok(())
+			};
+			match item {
+				syn::Item::Struct(s) => check_attrs(&s.attrs)?,
+				syn::Item::Type(t) => check_attrs(&t.attrs)?,
+				_ => {},
+			}
+		}
+
 		Ok(OriginDef { is_generic, instances, account_like_defs })
 	}
 }

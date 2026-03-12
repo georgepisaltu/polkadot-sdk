@@ -973,3 +973,29 @@ fn test_as_account_named_fields_variant() {
 		None
 	);
 }
+
+// =============================================================================
+// Test: direct AccountLike trait on non-generic origin type (pallet8)
+// =============================================================================
+
+#[test]
+fn test_non_generic_origin_account_like_trait_directly() {
+	// For non-generic enum origins, the AccountLike trait impl on the origin type
+	// itself uses default implementations (returns None), because the closures need
+	// access to T. The actual behavior is routed through OriginCaller.
+	assert_eq!(AccountLike::<u64>::as_account(&pallet8::Origin::Council(1)), None);
+	assert_eq!(AccountLike::<u64>::nonce_provider(&pallet8::Origin::Council(1)), None);
+	assert_eq!(AccountLike::<u64>::fee_payer(&pallet8::Origin::Council(1)), None);
+
+	// But through OriginCaller, it works correctly (with storage).
+	use sp_runtime::BuildStorage;
+	let t = RuntimeGenesisConfig { ..Default::default() }.build_storage().unwrap();
+	let mut ext = sp_io::TestExternalities::new(t);
+	ext.execute_with(|| {
+		pallet8::CouncilAccounts::<Runtime>::insert(1u32, 42u64);
+		assert_eq!(
+			OriginCaller::Pallet8(pallet8::Origin::Council(1)).as_account(),
+			Some(42u64)
+		);
+	});
+}

@@ -1,14 +1,5 @@
-error[E0433]: failed to resolve: use of unresolved module or unlinked crate `pallet`
-  --> tests/pallet_ui/as_account_on_struct.rs:40:4
+error: `#[pallet::as_account]` is only supported on enum origin variants
+  --> tests/pallet_ui/as_account_on_struct.rs:40:2
    |
 40 |     #[pallet::as_account(|_| None)]
-   |       ^^^^^^ use of unresolved module or unlinked crate `pallet`
-
-error: unused import: `frame_system::pallet_prelude::*`
-  --> tests/pallet_ui/as_account_on_struct.rs:25:6
-   |
-25 |     use frame_system::pallet_prelude::*;
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `-D unused-imports` implied by `-D warnings`
-   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
