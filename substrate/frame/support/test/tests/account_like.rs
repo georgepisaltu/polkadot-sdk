@@ -534,6 +534,79 @@ pub mod pallet14 {
 	}
 }
 
+/// Pallet 15: Has an Origin enum with variant `Delegate(AccountId, u32)`.
+/// The `as_account` closure returns Some(account) — uses the first field.
+#[frame_support::pallet(dev_mode)]
+pub mod pallet15 {
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
+
+	#[pallet::pallet]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	pub trait Config: frame_system::Config {}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
+			Ok(())
+		}
+	}
+
+	#[pallet::origin]
+	#[derive(
+		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
+	)]
+	pub enum Origin<T: Config> {
+		/// Shared variant name with pallet16, but different closure logic:
+		/// returns the account from field 0, ignoring the u32 weight field.
+		#[pallet::as_account(|who, _weight| Some(who.clone()))]
+		#[pallet::nonce_provider]
+		Delegate(T::AccountId, u32),
+		/// A variant unique to pallet15.
+		#[pallet::as_account(|who| Some(who.clone()))]
+		#[pallet::fee_payer]
+		Treasurer(T::AccountId),
+	}
+}
+
+/// Pallet 16: Also has an Origin enum with variant `Delegate(AccountId, u32)`.
+/// The `as_account` closure returns None when the second field is 0 (disabled delegate).
+#[frame_support::pallet(dev_mode)]
+pub mod pallet16 {
+	use frame_support::pallet_prelude::*;
+	use frame_system::pallet_prelude::*;
+
+	#[pallet::pallet]
+	pub struct Pallet<T>(_);
+
+	#[pallet::config]
+	pub trait Config: frame_system::Config {}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		pub fn noop(_origin: OriginFor<T>) -> DispatchResult {
+			Ok(())
+		}
+	}
+
+	#[pallet::origin]
+	#[derive(
+		Clone, PartialEq, Eq, Debug, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, TypeInfo,
+	)]
+	pub enum Origin<T: Config> {
+		/// Shared variant name with pallet15, but different closure logic:
+		/// returns None when the power field is 0 (disabled delegate).
+		#[pallet::as_account(|who, power| if *power > 0 { Some(who.clone()) } else { None })]
+		#[pallet::nonce_provider]
+		#[pallet::fee_payer]
+		Delegate(T::AccountId, u32),
+		/// A variant unique to pallet16.
+		Spectator,
+	}
+}
+
 pub type AccountId = u64;
 pub type Header = generic::Header<u32, BlakeTwo256>;
 pub type UncheckedExtrinsic = generic::UncheckedExtrinsic<u64, RuntimeCall, (), ()>;
@@ -558,6 +631,8 @@ frame_support::construct_runtime!(
 		Pallet12: pallet12,
 		Pallet13: pallet13,
 		Pallet14: pallet14,
+		Pallet15: pallet15,
+		Pallet16: pallet16,
 	}
 );
 
@@ -582,6 +657,8 @@ impl pallet11::Config for Runtime {}
 impl pallet12::Config for Runtime {}
 impl pallet13::Config for Runtime {}
 impl pallet14::Config for Runtime {}
+impl pallet15::Config for Runtime {}
+impl pallet16::Config for Runtime {}
 
 // =============================================================================
 // Tests for as_account
@@ -970,6 +1047,79 @@ fn test_as_account_named_fields_variant() {
 	);
 	assert_eq!(
 		OriginCaller::Pallet14(pallet14::Origin::Admin).fee_payer(),
+		None
+	);
+}
+
+// =============================================================================
+// Test: two pallets with identically-named Origin enums and shared variant names
+// =============================================================================
+
+#[test]
+fn test_same_origin_and_variant_names_are_independent() {
+	// pallet15::Origin::Delegate always returns Some(account), ignoring the weight field.
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Delegate(42, 0)).as_account(),
+		Some(42u64)
+	);
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Delegate(42, 999)).as_account(),
+		Some(42u64)
+	);
+	// pallet15::Delegate has nonce_provider but NOT fee_payer.
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Delegate(42, 0)).nonce_provider(),
+		Some(42u64)
+	);
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Delegate(42, 0)).fee_payer(),
+		None
+	);
+	// pallet15::Treasurer has fee_payer but NOT nonce_provider.
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Treasurer(7)).as_account(),
+		Some(7u64)
+	);
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Treasurer(7)).nonce_provider(),
+		None
+	);
+	assert_eq!(
+		OriginCaller::Pallet15(pallet15::Origin::Treasurer(7)).fee_payer(),
+		Some(7u64)
+	);
+
+	// pallet16::Origin::Delegate returns None when power == 0 (disabled delegate).
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Delegate(42, 0)).as_account(),
+		None
+	);
+	// pallet16::Delegate returns Some when power > 0.
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Delegate(42, 5)).as_account(),
+		Some(42u64)
+	);
+	// pallet16::Delegate has all three flags, but they all use the same closure.
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Delegate(42, 5)).nonce_provider(),
+		Some(42u64)
+	);
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Delegate(42, 5)).fee_payer(),
+		Some(42u64)
+	);
+	// Disabled delegate: all return None.
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Delegate(42, 0)).nonce_provider(),
+		None
+	);
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Delegate(42, 0)).fee_payer(),
+		None
+	);
+	// pallet16::Spectator has no as_account at all.
+	assert_eq!(
+		OriginCaller::Pallet16(pallet16::Origin::Spectator).as_account(),
 		None
 	);
 }

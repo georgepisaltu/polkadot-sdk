@@ -85,10 +85,11 @@ fn generate_account_like_impl(def: &Def) -> TokenStream {
 		})
 		.unwrap_or(false);
 
+	let type_impl_gen = &def.type_impl_generics(span);
+	let type_use_gen = &def.type_use_generics(span);
+	let where_clause = &def.config.where_clause;
+
 	if is_type_alias {
-		let type_impl_gen = &def.type_impl_generics(span);
-		let type_use_gen = &def.type_use_generics(span);
-		let where_clause = &def.config.where_clause;
 		return quote! {
 			impl<#type_impl_gen> Pallet<#type_use_gen> #where_clause {
 				#[doc(hidden)]
@@ -126,10 +127,6 @@ fn generate_account_like_impl(def: &Def) -> TokenStream {
 			}
 		};
 	}
-
-	let type_impl_gen = &def.type_impl_generics(span);
-	let type_use_gen = &def.type_use_generics(span);
-	let where_clause = &def.config.where_clause;
 
 	// The origin type reference for method parameters.
 	let origin_type_ref = if origin_def.is_generic {
@@ -237,21 +234,12 @@ fn generate_account_like_impl(def: &Def) -> TokenStream {
 		quote! { None }
 	};
 
-	let as_account_param = if has_as_account {
-		Ident::new("origin", span)
-	} else {
-		Ident::new("_origin", span)
-	};
-	let nonce_provider_param = if has_nonce_providers {
-		Ident::new("origin", span)
-	} else {
-		Ident::new("_origin", span)
-	};
-	let fee_payer_param = if has_fee_payers {
-		Ident::new("origin", span)
-	} else {
-		Ident::new("_origin", span)
-	};
+	let as_account_param =
+		if has_as_account { Ident::new("origin", span) } else { Ident::new("_origin", span) };
+	let nonce_provider_param =
+		if has_nonce_providers { Ident::new("origin", span) } else { Ident::new("_origin", span) };
+	let fee_payer_param =
+		if has_fee_payers { Ident::new("origin", span) } else { Ident::new("_origin", span) };
 
 	let pallet_methods = quote! {
 		#getter_fns
@@ -320,6 +308,18 @@ fn generate_account_like_impl(def: &Def) -> TokenStream {
 			}
 		}
 	} else {
+		// For non-generic origins (like `enum Origin {..}`) we don't implement the `AccountLike`
+		// trait. Instead we rely on the generated code in the pallet, `__as_account_for_*` which is
+		// called in `__as_account_for_origin`. These are then used in the `AccountLike` impl on
+		// `OriginCaller` in `construct_runtime!`. We need to implement this trait here regardless
+		// to satisfy trait bounds on `CallerTrait`. This is why nobody should use `AccountLike`
+		// directly on origins and instead rely on methods exposed by `CallerTrait` on the
+		// `RuntimeOrigin`, which will be correct because they are generated as stated above in
+		// `construct_runtime!`.
+		//
+		// If we just got rid of the need to be able to access `T` in the closure, we could get rid
+		// of this, but we will lose the ability to access storage and other pallet methods inside
+		// natively.
 		quote! {
 			impl<AccountId> #frame_support::traits::AccountLike<AccountId> for Origin {}
 		}
