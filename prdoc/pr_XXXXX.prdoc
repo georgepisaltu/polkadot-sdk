@@ -1,0 +1,21 @@
+title: Add `pallet-assets-forwarder`
+doc:
+- audience: Runtime Dev
+  description: |-
+    Adds `pallet-assets-forwarder`, which lets any signed account replicate an asset of a local
+    `fungibles` registry onto a sibling chain over XCM. The pallet reads the asset's minimum
+    balance and sufficiency from the registry and sends the destination a `Transact` that
+    force-creates the replica, owned by the pallet's sovereign account there. A permissionless
+    `sync_asset_status` call re-sends the values after they change, and a manager origin can
+    remove the local record and release the caller's deposit.
+
+    The registry is any `fungibles::Inspect` implementation, so a single `pallet-assets` instance
+    and a `fungibles::UnionOf` of local and foreign assets both work. `AssetIdToLocation` maps an
+    asset id to its location from the sending chain's perspective, which is reanchored to the
+    destination to name the replica. The pallet is pinned to XCM v5 and assumes the destination's
+    `pallet-assets` instance is keyed by `xcm::v5::Location`.
+crates:
+- name: pallet-assets-forwarder
+  bump: major
+- name: polkadot-sdk
+  bump: minor
