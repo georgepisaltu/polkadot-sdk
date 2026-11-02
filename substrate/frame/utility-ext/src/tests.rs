@@ -55,6 +55,20 @@ pub mod example {
 			Ok(())
 		}
 
+		/// Authorized while nothing was claimed yet. Like some in-tree calls, dispatch relies on
+		/// `authorize` having just run and does not check again.
+		#[pallet::call_index(4)]
+		#[pallet::weight(Weight::zero())]
+		#[pallet::weight_of_authorize(Weight::zero())]
+		#[pallet::authorize(Self::authorize_claim)]
+		pub fn claim(origin: OriginFor<T>) -> DispatchResult {
+			ensure_authorized(origin)?;
+			ClaimTrace::<T>::append(Step::Dispatch);
+			Claimed::<T>::put(true);
+			Claims::<T>::mutate(|n| *n += 1);
+			Ok(())
+		}
+
 		#[pallet::call_index(3)]
 		#[pallet::weight((Weight::from_parts(10, 0), Pays::No))]
 		pub fn free(origin: OriginFor<T>, err: bool) -> DispatchResult {
@@ -96,6 +110,35 @@ pub mod example {
 	/// How many times `council_only` was dispatched.
 	#[pallet::storage]
 	pub type CouncilCalls<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	#[pallet::storage]
+	pub type Claimed<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+	/// How many times `claim` was dispatched.
+	#[pallet::storage]
+	pub type Claims<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	#[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Debug)]
+	pub enum Step {
+		Authorize,
+		Dispatch,
+	}
+
+	/// The order in which `claim` was authorized and dispatched.
+	#[pallet::storage]
+	pub type ClaimTrace<T: Config> = StorageValue<_, Vec<Step>, ValueQuery>;
+
+	impl<T: Config> Pallet<T> {
+		pub fn authorize_claim(_source: TransactionSource) -> TransactionValidityWithRefund {
+			if Claimed::<T>::get() {
+				return Err(InvalidTransaction::Stale.into());
+			}
+			ClaimTrace::<T>::append(Step::Authorize);
+			let validity =
+				ValidTransaction { provides: vec![b"claim".to_vec()], ..Default::default() };
+			Ok((validity, Weight::zero()))
+		}
+	}
 }
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -183,7 +226,12 @@ impl Contains<RuntimeCall> for MultiOriginCallFilter {
 }
 
 /// The inner extension pipeline of `batch_multi_origin` items in tests.
-pub type InnerExtension = (MultiOriginBatchMarker<Test>, SetOrigin, frame_system::CheckNonce<Test>);
+pub type InnerExtension = (
+	MultiOriginBatchMarker<Test>,
+	SetOrigin,
+	frame_system::AuthorizeCall<Test>,
+	frame_system::CheckNonce<Test>,
+);
 
 #[cfg(feature = "runtime-benchmarks")]
 pub struct BenchmarkItems;
@@ -195,6 +243,7 @@ impl BenchmarkHelper<Test> for BenchmarkItems {
 			(
 				MultiOriginBatchMarker::new(),
 				SetOrigin::signed(1),
+				frame_system::AuthorizeCall::new(),
 				frame_system::CheckNonce::from(0),
 			),
 			OriginCaller::system(frame_system::RawOrigin::Signed(1)),
@@ -396,9 +445,21 @@ mod multi_origin {
 		let origin = set_origin.0.clone();
 		MultiOriginItem::new(
 			call,
-			(MultiOriginBatchMarker::new(), set_origin, frame_system::CheckNonce::from(nonce)),
+			(
+				MultiOriginBatchMarker::new(),
+				set_origin,
+				frame_system::AuthorizeCall::new(),
+				frame_system::CheckNonce::from(nonce),
+			),
 			origin,
 		)
+	}
+
+	/// An item authorized by `AuthorizeCall`: nothing sets an origin before it.
+	fn authorized_item(call: RuntimeCall) -> MultiOriginItemOf<Test> {
+		let mut item = item(call, SetOrigin::none());
+		item.origin = OriginCaller::system(frame_system::RawOrigin::Authorized);
+		item
 	}
 
 	fn expecting(mut item: MultiOriginItemOf<Test>, who: u64) -> MultiOriginItemOf<Test> {
@@ -867,6 +928,35 @@ mod multi_origin {
 			assert!(apply(call).unwrap().is_err());
 			assert_eq!(SetOrigin::seen_pays_no(), 2);
 			assert_transient_storage_empty();
+		});
+	}
+
+	#[test]
+	fn authorization_is_not_rechecked_against_earlier_items_dispatch() {
+		use example::Step::{Authorize, Dispatch};
+		new_test_ext().execute_with(|| {
+			let claim = RuntimeCall::Example(ExampleCall::claim {});
+
+			// As transactions of their own, the second claim is rejected.
+			assert_ok!(apply(batch_call(vec![authorized_item(claim.clone())])).unwrap());
+			assert_eq!(
+				apply(batch_call(vec![authorized_item(claim.clone())])),
+				Err(InvalidTransaction::Stale.into())
+			);
+			assert_eq!(example::Claims::<Test>::get(), 1);
+			assert_eq!(example::ClaimTrace::<Test>::take(), vec![Authorize, Dispatch]);
+			example::Claimed::<Test>::kill();
+			example::Claims::<Test>::kill();
+
+			// In one batch, both are authorized before either is dispatched, so both claim.
+			let call =
+				batch_call(vec![authorized_item(claim.clone()), authorized_item(claim.clone())]);
+			assert_ok!(apply(call).unwrap());
+			assert_eq!(example::Claims::<Test>::get(), 2);
+			assert_eq!(
+				example::ClaimTrace::<Test>::get(),
+				vec![Authorize, Authorize, Dispatch, Dispatch]
+			);
 		});
 	}
 
