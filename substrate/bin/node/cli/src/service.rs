@@ -137,7 +137,10 @@ pub fn create_extrinsic(
 				best_block.saturated_into(),
 			)),
 			frame_system::CheckNonce::<kitchensink_runtime::Runtime>::from(nonce),
-			frame_system::CheckWeight::<kitchensink_runtime::Runtime>::new(),
+			(
+				frame_system::CheckWeight::<kitchensink_runtime::Runtime>::new(),
+				pallet_utility_ext::MultiOriginBatch::<kitchensink_runtime::Runtime>::new(),
+			),
 			pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 				pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::<
 					kitchensink_runtime::Runtime,
@@ -159,7 +162,7 @@ pub fn create_extrinsic(
 			genesis_hash,
 			best_hash,
 			(),
-			(),
+			((), ()),
 			(),
 			None,
 			(),
@@ -1133,6 +1136,7 @@ mod tests {
 				let check_era = frame_system::CheckEra::from(Era::Immortal);
 				let check_nonce = frame_system::CheckNonce::from(index);
 				let check_weight = frame_system::CheckWeight::new();
+				let multi_origin_batch = pallet_utility_ext::MultiOriginBatch::new();
 				let tx_payment = pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 					pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::from(0, None),
 				);
@@ -1147,7 +1151,7 @@ mod tests {
 					check_genesis,
 					check_era,
 					check_nonce,
-					check_weight,
+					(check_weight, multi_origin_batch),
 					tx_payment,
 					metadata_hash,
 					set_eth_origin,
@@ -1164,7 +1168,7 @@ mod tests {
 						genesis_hash,
 						genesis_hash,
 						(),
-						(),
+						((), ()),
 						(),
 						None,
 						(),

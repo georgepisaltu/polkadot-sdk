@@ -82,7 +82,7 @@ pub fn tx_ext(nonce: Nonce, extra_fee: Balance) -> TxExtension {
 		frame_system::CheckGenesis::new(),
 		frame_system::CheckEra::from(Era::mortal(256, 0)),
 		frame_system::CheckNonce::from(nonce),
-		frame_system::CheckWeight::new(),
+		(frame_system::CheckWeight::new(), pallet_utility_ext::MultiOriginBatch::new()),
 		pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 			pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::from(extra_fee, None),
 		),
