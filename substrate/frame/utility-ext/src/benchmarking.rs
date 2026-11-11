@@ -15,29 +15,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Benchmarks for the Utility Extension Pallet
+//! Benchmarks for the Utility Extension Pallet.
+//!
+//! The items are built by [`Config::BenchmarkHelper`] with the real inner pipeline and a real
+//! call, so the measured per-item overhead includes one run of that pipeline (signature check,
+//! nonce and fee bookkeeping) and the call itself, which the batch also charges separately
+//! through the items' declared weights. The overhead is therefore overestimated by roughly one
+//! cheap signed transaction per item. This is deliberate: the error is in the safe direction, it
+//! is only ever paid by the submitter of a batch call and never by any other transaction, and a
+//! benchmark with a weightless pipeline would not exercise the code the batch really runs.
 
 #![cfg(feature = "runtime-benchmarks")]
 
-use alloc::vec;
+use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
-use frame_support::traits::{Get, OriginTrait};
-use frame_system::RawOrigin;
+use frame_support::traits::Get;
 
 use crate::*;
 
-fn assert_last_event<T: Config>(generic_event: <T as Config>::RuntimeEvent) {
+fn assert_last_event<T: Config>(generic_event: <T as frame_system::Config>::RuntimeEvent) {
 	frame_system::Pallet::<T>::assert_last_event(generic_event.into());
 }
 
-/// `c` items, each a `remark`.
-fn multi_origin_items<T: Config>(c: u32) -> MultiOriginItemsOf<T> {
-	let item = <T as Config>::BenchmarkHelper::item(
-		frame_system::Call::<T>::remark { remark: vec![] }.into(),
-	);
-	vec![item; c as usize]
-		.try_into()
-		.expect("`c` is bounded by `MaxMultiOriginBatch`; qed")
+/// The origin of the benchmark batches and `c` items of it, each a `remark`, signed for a batch
+/// in `mode` of the whitelisted caller with nonce 0.
+fn batch<T: Config>(c: u32, mode: BatchMode) -> (Origin<T>, MultiOriginItemsOf<T>) {
+	let submitter: T::AccountId = whitelisted_caller();
+	let nonce = Default::default();
+	let origin = T::BenchmarkHelper::setup();
+	let call: RuntimeCallOf<T> = frame_system::Call::<T>::remark { remark: Vec::new() }.into();
+	let items_hash = Pallet::<T>::items_hash((0..c).map(|_| (&call, &origin)));
+	let items: Vec<_> = (0..c)
+		.map(|index| {
+			let implication = ItemImplication {
+				mode,
+				submitter: &submitter,
+				nonce,
+				index,
+				items_hash: &items_hash,
+			};
+			T::BenchmarkHelper::item(call.clone(), index.into(), implication.encode())
+		})
+		.collect();
+	let items = items.try_into().expect("`c` is bounded by `MaxMultiOriginBatch`; qed");
+	(RawOrigin::MultiOriginBatch { submitter, nonce }, items)
 }
 
 #[benchmarks]
@@ -45,20 +66,23 @@ mod benchmark {
 	use super::*;
 
 	#[benchmark]
-	fn batch_multi_origin(c: Linear<0, { T::MaxMultiOriginBatch::get() }>) {
-		let items = multi_origin_items::<T>(c);
-		// The origins the extension would have stored.
-		let caller: T::AccountId = whitelisted_caller();
-		let origin: <T as frame_system::Config>::RuntimeOrigin = RawOrigin::Signed(caller).into();
-		let pallets_origin = PalletsOriginOf::<T>::from(origin.into_caller());
-		MultiOrigins::<T>::put(vec![pallets_origin; c as usize]);
+	fn batch_multi_origin(c: Linear<1, { T::MaxMultiOriginBatch::get() }>) {
+		let (origin, items) = batch::<T>(c, BatchMode::Stop);
 
 		#[extrinsic_call]
-		_(Origin::MultiOriginBatch, items);
+		_(origin, items);
 
 		assert_last_event::<T>(Event::BatchCompleted.into());
-		assert!(MultiOrigins::<T>::get().is_none());
-		assert_eq!(MultiOriginPostInfos::<T>::get().map(|p| p.len()), Some(c as usize));
+	}
+
+	#[benchmark]
+	fn force_batch_multi_origin(c: Linear<1, { T::MaxMultiOriginBatch::get() }>) {
+		let (origin, items) = batch::<T>(c, BatchMode::Continue);
+
+		#[extrinsic_call]
+		_(origin, items);
+
+		assert_last_event::<T>(Event::BatchCompleted.into());
 	}
 
 	impl_benchmark_test_suite! {

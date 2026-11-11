@@ -15,49 +15,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Transaction extensions for [`Pallet::batch_multi_origin`](crate::Pallet::batch_multi_origin).
+//! The transaction extension of multi-origin batches and the implication their items sign.
 //!
-//! - [`MultiOriginBatch`] goes in the runtime's pipeline and authorizes general
-//!   `batch_multi_origin` transactions by applying every item.
-//! - [`MultiOriginBatchMarker`] goes in the items' pipeline ([`Config::InnerExtension`]) and keeps
-//!   item signatures distinct from those of regular transactions.
-//! - [`ItemImplication`] is included in the implication and therefore in the signing payload.
+//! - [`MultiOriginBatch`] goes in the runtime's pipeline before its fee payment extension. It
+//!   authorizes multi-origin batch transactions and charges their submitter for their share of the
+//!   batch.
+//! - [`ItemImplication`] is the base implication of every item, and therefore part of its signing
+//!   payload.
 
 use crate::{
-	Config, MultiOriginItemsOf, MultiOriginPostInfos, MultiOrigins, Origin, Pallet, PalletsOriginOf,
+	AccountIdOf, BatchMode, Config, MultiOriginItemsOf, NonceOf, Pallet, RawOrigin, RefundableShare,
 };
-use alloc::vec::Vec;
 use codec::{Decode, DecodeWithMemTracking, Encode};
 use core::{fmt, marker::PhantomData};
 use frame_support::{
-	dispatch::{DispatchInfo, PostDispatchInfo},
+	dispatch::{DispatchInfo, Pays, PostDispatchInfo},
 	pallet_prelude::TransactionSource,
-	storage::{with_transaction, TransactionOutcome},
-	traits::{Contains, IsType, OriginTrait},
+	traits::{Imbalance, OriginTrait, SuppressedDrop},
 	CloneNoBound, DefaultNoBound, EqNoBound, PartialEqNoBound,
+};
+use pallet_transaction_payment::{
+	ChargeTransactionPayment, OnChargeTransaction, TxCreditHold, WeightInfo as _,
 };
 use scale_info::TypeInfo;
 use sp_runtime::{
-	generic::ExtensionVersion,
-	impl_tx_ext_default,
 	traits::{
-		AsTransactionAuthorizedOrigin, ExtensionPostDispatchWeightHandler, Implication,
-		PostDispatchInfoOf, TransactionExtension, TxBaseImplication, ValidateResult,
+		CheckedAdd, Implication, One, PostDispatchInfoOf, TransactionExtension, ValidateResult,
+		Zero,
 	},
 	transaction_validity::{InvalidTransaction, TransactionValidityError, ValidTransaction},
-	DispatchError, DispatchResult, Weight,
+	DispatchResult, Weight,
 };
 
 type RuntimeCallOf<T> = <T as frame_system::Config>::RuntimeCall;
 type RuntimeOriginOf<T> = <T as frame_system::Config>::RuntimeOrigin;
-type InnerValOf<T> = <<T as Config>::InnerExtension as TransactionExtension<RuntimeCallOf<T>>>::Val;
-type InnerPreOf<T> = <<T as Config>::InnerExtension as TransactionExtension<RuntimeCallOf<T>>>::Pre;
-
-/// The inner `Pre`, dispatch info and encoded length of an item.
-type ItemPreOf<T> = (InnerPreOf<T>, DispatchInfo, usize);
-
-/// The extension version every item is applied with.
-pub const ITEM_EXTENSION_VERSION: ExtensionVersion = 0;
+type PaymentOf<T> = <T as pallet_transaction_payment::Config>::OnChargeTransaction;
+type BalanceOf<T> = <PaymentOf<T> as OnChargeTransaction<T>>::Balance;
+type LiquidityInfoOf<T> = <PaymentOf<T> as OnChargeTransaction<T>>::LiquidityInfo;
+/// The credit `pallet_transaction_payment` keeps a withdrawn fee in.
+type CreditOf<T> = <<PaymentOf<T> as TxCreditHold<T>>::Credit as SuppressedDrop>::Inner;
 
 /// Leads the encoding of [`ItemImplication`], so that it does not encode like the implication of
 /// a regular transaction, `(extension_version, call)`, for any realistic extension version and
@@ -66,103 +62,91 @@ pub const ITEM_IMPLICATION_PREFIX: &[u8; 8] = b"_mbatch_";
 
 /// The implication an item is validated with, in place of the usual `(extension_version, call)`.
 ///
-/// It binds the item to its batch: an item cannot be applied alone, in another batch or next to
-/// other parties than the ones it was signed for.
-pub struct ItemImplication<'a, Call, Origin> {
-	/// Always [`ITEM_EXTENSION_VERSION`].
-	pub extension_version: ExtensionVersion,
+/// It binds the item to its batch: an item cannot be applied alone, in another batch, in a batch
+/// of the other mode, next to other parties than the ones it was signed for, or in a batch
+/// submitted by another account or by the same account as another one of its transactions.
+///
+/// It encodes as [`ITEM_IMPLICATION_PREFIX`] followed by the SCALE encoding of its fields in
+/// order.
+pub struct ItemImplication<'a, AccountId, Nonce, Hash> {
+	/// The mode of the batch.
+	pub mode: BatchMode,
+	/// The account submitting the batch.
+	pub submitter: &'a AccountId,
+	/// The nonce of the submitter's batch transaction.
+	pub nonce: Nonce,
 	/// The position of the item in the batch.
 	pub index: u32,
-	/// The call and origin of all items, in order.
-	pub items: &'a [(&'a Call, &'a Origin)],
+	/// The hash of the calls and origins of all items, see
+	/// [`Pallet::items_hash`](crate::Pallet::items_hash).
+	pub items_hash: &'a Hash,
 }
 
-impl<'a, Call: Encode, Origin: Encode> Encode for ItemImplication<'a, Call, Origin> {
+impl<'a, AccountId: Encode, Nonce: Encode, Hash: Encode> Encode
+	for ItemImplication<'a, AccountId, Nonce, Hash>
+{
 	fn encode_to<O: codec::Output + ?Sized>(&self, dest: &mut O) {
 		dest.write(ITEM_IMPLICATION_PREFIX);
-		self.extension_version.encode_to(dest);
+		self.mode.encode_to(dest);
+		self.submitter.encode_to(dest);
+		self.nonce.encode_to(dest);
 		self.index.encode_to(dest);
-		self.items.encode_to(dest);
+		self.items_hash.encode_to(dest);
 	}
-}
-
-/// Marker extension for the items of a `batch_multi_origin` call.
-///
-/// Carries constant implicit data so that an item's signature differs from that of a regular
-/// transaction with the same call and extension data.
-#[derive(
-	Encode,
-	Decode,
-	DecodeWithMemTracking,
-	CloneNoBound,
-	EqNoBound,
-	PartialEqNoBound,
-	DefaultNoBound,
-	TypeInfo,
-)]
-#[scale_info(skip_type_params(T))]
-pub struct MultiOriginBatchMarker<T>(PhantomData<T>);
-
-impl<T> fmt::Debug for MultiOriginBatchMarker<T> {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "MultiOriginBatchMarker")
-	}
-}
-
-impl<T> MultiOriginBatchMarker<T> {
-	/// Create a new marker extension.
-	pub fn new() -> Self {
-		Self(PhantomData)
-	}
-}
-
-impl<T: Config + Send + Sync> TransactionExtension<RuntimeCallOf<T>> for MultiOriginBatchMarker<T> {
-	const IDENTIFIER: &'static str = "MultiOriginBatchMarker";
-	type Implicit = [u8; 8];
-	type Val = ();
-	type Pre = ();
-
-	fn implicit(&self) -> Result<Self::Implicit, TransactionValidityError> {
-		Ok(*b"_mb_mrk_")
-	}
-
-	fn weight(&self, _call: &RuntimeCallOf<T>) -> Weight {
-		Weight::zero()
-	}
-
-	impl_tx_ext_default!(RuntimeCallOf<T>; validate prepare);
 }
 
 /// The [`TransactionExtension::Val`] of [`MultiOriginBatch`].
-pub enum Val {
-	/// Not a `batch_multi_origin` transaction authorized by this extension.
-	NotUsing,
-	/// A `batch_multi_origin` transaction authorized by this extension.
-	Using,
+pub enum Val<AccountId, Nonce, Balance> {
+	/// Not a multi-origin batch transaction.
+	Other,
+	/// A multi-origin batch transaction: its submitter, their nonce, the dispatch info of the
+	/// submitter's share and the fee it costs.
+	Batch { submitter: AccountId, nonce: Nonce, share: DispatchInfo, fee: Balance },
 }
 
 /// The [`TransactionExtension::Pre`] of [`MultiOriginBatch`].
-pub enum Pre<T: Config> {
-	/// Not a `batch_multi_origin` transaction authorized by this extension. Holds the unspent
-	/// weight.
-	NotUsing(Weight),
-	/// The pre-dispatch data of every item.
-	Using(Vec<ItemPreOf<T>>),
+pub enum Pre<T: Config + pallet_transaction_payment::Config> {
+	/// Not a multi-origin batch transaction.
+	Other,
+	/// A multi-origin batch transaction whose share was withdrawn and is settled after dispatch.
+	Batch {
+		submitter: AccountIdOf<T>,
+		/// The dispatch info the share was withdrawn for.
+		share: DispatchInfo,
+		/// The withdrawn fee, kept out of the transient fee credit while the items run.
+		parked: Option<CreditOf<T>>,
+		liquidity_info: LiquidityInfoOf<T>,
+	},
 }
 
-/// Transaction extension authorizing general `batch_multi_origin` transactions.
+/// Transaction extension authorizing multi-origin batch transactions and charging their
+/// submitter for their share of the batch.
 ///
-/// Every item is applied as a general transaction, validated and prepared back to back so that it
-/// sees the state left by the items before it.
-/// - `validate` dry runs the items in a storage transaction which is rolled back.
-/// - `prepare` applies them and stores the authorized origins in
-/// [`MultiOrigins`] for the call.
-/// - `post_dispatch` runs every item's post dispatch with the actual weight recorded in
-/// [`MultiOriginPostInfos`].
+/// It goes in the runtime's pipeline after `CheckNonce` and before the fee payment extension.
+/// For any transaction other than a multi-origin batch it does nothing.
 ///
-/// Items pay for the whole transaction, see [`Pallet::multi_origin_item_infos`]. The extension's
-/// own work is not weighed. It handles at most `MaxMultiOriginBatch` items and its storage never
-/// leaves the overlay.
+/// For a multi-origin batch, submitted as a regular signed transaction:
+/// - `validate` checks the items statically (see [`Pallet::check_items`]), checks that the
+///   submitter can pay the fee of their share, see [`Pallet::submitter_weight`], computed like
+///   `pallet_transaction_payment` does, gives the transaction the priority that fee earns for the
+///   batch's full weight, and replaces the signed origin with [`RawOrigin::MultiOriginBatch`],
+///   carrying the submitter and their current nonce, so that only this extension can dispatch the
+///   batch calls. The fee payment extension after it sees that origin and charges nothing; its tip
+///   is ignored.
+/// - `prepare` withdraws the fee through the runtime's `OnChargeTransaction` and takes it out of
+///   the transient fee credit of `pallet_transaction_payment`, so that the items find it empty and
+///   settle their own fee payments without touching the submitter's. It also checks that the
+///   submitter's nonce was bumped and rejects the batch otherwise, since a batch whose nonce is not
+///   checked could be replayed.
+/// - `post_dispatch` puts the fee back and settles it, refunding the submitter the part of the
+///   share made refundable by the items, see [`RefundableShare`]: the pipeline weight and bytes of
+///   the items whose dispatch returned `Pays::No`. Nothing else is refunded, whatever the items do.
+///
+/// The submitter pays in the native currency. `CheckWeight` is unaffected: it sees the batch's
+/// full weight, items included. The share includes the weight of the fee payment extension,
+/// although that extension refunds it for batches. The extension weighs nothing for other
+/// transactions; for a batch its weight is that of `ChargeTransactionPayment`, as it does the
+/// same work. [`RefundableShare`] is transient and not accounted for.
 #[derive(
 	Encode,
 	Decode,
@@ -189,96 +173,61 @@ impl<T> MultiOriginBatch<T> {
 	}
 }
 
-impl<T: Config + Send + Sync> MultiOriginBatch<T> {
-	/// Validate and prepare every item in order. `info` and `len` are the whole transaction's.
-	fn apply_items(
+impl<T: Config + pallet_transaction_payment::Config> MultiOriginBatch<T> {
+	/// The dispatch info of the submitter's share of a batch of `items`, given the batch's.
+	fn submitter_info(
 		items: &MultiOriginItemsOf<T>,
+		mode: BatchMode,
 		info: &DispatchInfo,
-		len: usize,
-		source: TransactionSource,
-	) -> Result<
-		(ValidTransaction, Vec<ItemPreOf<T>>, Vec<PalletsOriginOf<T>>),
-		TransactionValidityError,
-	> {
-		let commitments: Vec<_> = items.iter().map(|item| (&item.call, &item.origin)).collect();
-		let mut validity = ValidTransaction::default();
-		let mut priority = None;
-		let mut pres = Vec::with_capacity(items.len());
-		let mut origins = Vec::with_capacity(items.len());
-		let item_infos = Pallet::<T>::multi_origin_item_infos(items, info, len);
-		for (index, (item, (item_info, item_len))) in items.iter().zip(item_infos).enumerate() {
-			let (item_validity, item_val, item_origin) = Self::validate_item(
-				&commitments,
-				index,
-				&item.extension,
-				&item_info,
-				item_len,
-				source,
-			)?;
-			if PalletsOriginOf::<T>::from_ref(item_origin.caller()) != &item.origin {
-				return Err(InvalidTransaction::BadSigner.into());
-			}
-			let item_pre = item.extension.clone().prepare(
-				item_val,
-				&item_origin,
-				&item.call,
-				&item_info,
-				item_len,
-			)?;
-			priority = Some(item_validity.priority.min(priority.unwrap_or(item_validity.priority)));
-			validity = validity.combine_with(item_validity);
-			pres.push((item_pre, item_info, item_len));
-			origins.push(PalletsOriginOf::<T>::from(item_origin.into_caller()));
+	) -> DispatchInfo {
+		DispatchInfo {
+			call_weight: Pallet::<T>::submitter_weight(items, mode),
+			extension_weight: info.extension_weight,
+			class: info.class,
+			pays_fee: info.pays_fee,
 		}
-		// We take the min here conservatively because the sum would let a batch of small items jump
-		// the queue.
-		validity.priority = priority.unwrap_or_default();
-		Ok((validity, pres, origins))
 	}
 
-	/// Validate the item at `index` as a general transaction bound to `items`.
-	fn validate_item(
-		items: &[(&RuntimeCallOf<T>, &PalletsOriginOf<T>)],
-		index: usize,
-		extension: &<T as Config>::InnerExtension,
-		item_info: &DispatchInfo,
-		item_len: usize,
-		source: TransactionSource,
-	) -> Result<(ValidTransaction, InnerValOf<T>, RuntimeOriginOf<T>), TransactionValidityError> {
-		let implication = TxBaseImplication(ItemImplication {
-			extension_version: ITEM_EXTENSION_VERSION,
-			index: index as u32,
-			items,
-		});
-		let (validity, val, origin) = extension.validate(
-			frame_system::RawOrigin::None.into(),
-			items[index].0,
-			item_info,
-			item_len,
-			extension.implicit()?,
-			&implication,
-			source,
-		)?;
-		if !origin.is_transaction_authorized() {
-			return Err(InvalidTransaction::UnknownOrigin.into());
-		}
-		Ok((validity, val, origin))
+	/// What the submitter of the batch transaction `uxt` of `len` bytes pays for: the weight
+	/// and class of their share and its fee, before any refund for items which turn out to be
+	/// free. `None` if `uxt` is not a batch. The counterpart of
+	/// `pallet_transaction_payment::Pallet::query_info`, which prices the whole batch.
+	pub fn query_share_info<Xt>(
+		uxt: &Xt,
+		len: u32,
+	) -> Option<pallet_transaction_payment::RuntimeDispatchInfo<BalanceOf<T>>>
+	where
+		Xt: sp_runtime::traits::ExtrinsicCall<Call = RuntimeCallOf<T>>
+			+ frame_support::dispatch::GetDispatchInfo,
+	{
+		let (items, mode) = Pallet::<T>::batch_items(uxt.call())?;
+		let share = Self::submitter_info(items, mode, &uxt.get_dispatch_info());
+		let partial_fee =
+			pallet_transaction_payment::Pallet::<T>::compute_fee(len, &share, Zero::zero());
+		Some(pallet_transaction_payment::RuntimeDispatchInfo {
+			weight: share.total_weight(),
+			class: share.class,
+			partial_fee,
+		})
 	}
 }
 
-impl<T: Config + Send + Sync> TransactionExtension<RuntimeCallOf<T>> for MultiOriginBatch<T> {
+impl<T: Config + pallet_transaction_payment::Config + Send + Sync>
+	TransactionExtension<RuntimeCallOf<T>> for MultiOriginBatch<T>
+where
+	CreditOf<T>: Imbalance<BalanceOf<T>>,
+{
 	const IDENTIFIER: &'static str = "MultiOriginBatch";
 	type Implicit = ();
-	type Val = Val;
+	type Val = Val<AccountIdOf<T>, NonceOf<T>, BalanceOf<T>>;
 	type Pre = Pre<T>;
 
 	fn weight(&self, call: &RuntimeCallOf<T>) -> Weight {
-		let Some(items) = Pallet::<T>::multi_origin_items(call) else {
+		if Pallet::<T>::batch_items(call).is_none() {
 			return Weight::zero();
-		};
-		items.iter().fold(Weight::zero(), |weight, item| {
-			weight.saturating_add(Pallet::<T>::multi_origin_item_extension_weight(item))
-		})
+		}
+		// Charging like the fee payment extension; `RefundableShare` is whitelisted.
+		<T as pallet_transaction_payment::Config>::WeightInfo::charge_transaction_payment()
 	}
 
 	fn validate(
@@ -289,32 +238,30 @@ impl<T: Config + Send + Sync> TransactionExtension<RuntimeCallOf<T>> for MultiOr
 		len: usize,
 		_self_implicit: Self::Implicit,
 		_inherited_implication: &impl Implication,
-		source: TransactionSource,
+		_source: TransactionSource,
 	) -> ValidateResult<Self::Val, RuntimeCallOf<T>> {
-		// Only general `batch_multi_origin` transactions are handled.
-		let items = match Pallet::<T>::multi_origin_items(call) {
-			Some(items) if !origin.is_transaction_authorized() => items,
-			_ => return Ok((ValidTransaction::default(), Val::NotUsing, origin)),
+		let Some((items, mode)) = Pallet::<T>::batch_items(call) else {
+			return Ok((ValidTransaction::default(), Val::Other, origin));
 		};
-		if items.is_empty() {
-			return Err(InvalidTransaction::Call.into());
-		}
-		// Nested calls are filtered at dispatch through the item's origin.
-		if items
-			.iter()
-			.any(|item| !<T as Config>::MultiOriginCallFilter::contains(&item.call))
-		{
-			return Err(InvalidTransaction::Call.into());
-		}
 
-		// Dry run the items in sequence without writing anything.
-		let validity = with_transaction::<_, DispatchError, _>(|| {
-			let result = Self::apply_items(items, info, len, source).map(|(validity, ..)| validity);
-			TransactionOutcome::Rollback(Ok(result))
-		})
-		.map_err(|_| InvalidTransaction::ExhaustsResources)??;
+		// Only signed transactions can be multi-origin batches: someone has to pay.
+		let submitter = origin.as_signer().cloned().ok_or(InvalidTransaction::BadSigner)?;
+		Pallet::<T>::check_items(items)?;
 
-		Ok((validity, Val::Using, Origin::MultiOriginBatch.into()))
+		let share = Self::submitter_info(items, mode, info);
+		let tip = Zero::zero();
+		let fee = pallet_transaction_payment::Pallet::<T>::compute_fee(len as u32, &share, tip);
+		PaymentOf::<T>::can_withdraw_fee(&submitter, call, &share, fee, tip)?;
+		// The batch takes its full weight in the block, so the fee earns the priority of that
+		// weight, not the share's.
+		let priority = ChargeTransactionPayment::<T>::get_priority(info, len, tip, fee);
+
+		// `CheckNonce` only bumps the nonce in `prepare`, so this is the nonce of the transaction.
+		let nonce = frame_system::Pallet::<T>::account_nonce(&submitter);
+		let origin: RuntimeOriginOf<T> =
+			RawOrigin::MultiOriginBatch { submitter: submitter.clone(), nonce }.into();
+		let validity = ValidTransaction { priority, ..Default::default() };
+		Ok((validity, Val::Batch { submitter, nonce, share, fee }, origin))
 	}
 
 	fn prepare(
@@ -322,53 +269,78 @@ impl<T: Config + Send + Sync> TransactionExtension<RuntimeCallOf<T>> for MultiOr
 		val: Self::Val,
 		_origin: &RuntimeOriginOf<T>,
 		call: &RuntimeCallOf<T>,
-		info: &DispatchInfo,
-		len: usize,
+		_info: &DispatchInfo,
+		_len: usize,
 	) -> Result<Self::Pre, TransactionValidityError> {
-		let Val::Using = val else { return Ok(Pre::NotUsing(self.weight(call))) };
-		let items = Pallet::<T>::multi_origin_items(call).ok_or(InvalidTransaction::Call)?;
-		let (_, pres, origins) = Self::apply_items(items, info, len, TransactionSource::InBlock)?;
-		MultiOrigins::<T>::put(origins);
+		let Val::Batch { submitter, nonce, share, fee } = val else { return Ok(Pre::Other) };
+		// `CheckNonce::prepare` must have run by now, or the batch could be replayed.
+		let bumped = nonce.checked_add(&One::one()).unwrap_or_else(Zero::zero);
+		if frame_system::Pallet::<T>::account_nonce(&submitter) != bumped {
+			log::error!(
+				target: "runtime::utility-ext",
+				"The submitter's nonce was not bumped before `MultiOriginBatch::prepare`: \
+				the extension must come after `CheckNonce` in the pipeline.",
+			);
+			return Err(InvalidTransaction::BadSigner.into());
+		}
 
-		Ok(Pre::Using(pres))
+		// A fee payment extension placed before this one would have charged the submitter the
+		// batch's full fee already.
+		if !pallet_transaction_payment::Pallet::<T>::remaining_txfee::<BalanceOf<T>>().is_zero() {
+			log::error!(
+				target: "runtime::utility-ext",
+				"A fee was withdrawn before `MultiOriginBatch::prepare`: the extension must come \
+				before the fee payment extension in the pipeline.",
+			);
+			return Err(InvalidTransaction::Payment.into());
+		}
+
+		// Only what this dispatch makes refundable counts.
+		RefundableShare::<T>::kill();
+		let tip = Zero::zero();
+		let liquidity_info = PaymentOf::<T>::withdraw_fee(&submitter, call, &share, fee, tip)?;
+		// Keep the withdrawn fee out of the transient fee credit while the items run their own
+		// payments, which settle whatever that credit holds.
+		let parked = pallet_transaction_payment::Pallet::<T>::withdraw_txfee(
+			pallet_transaction_payment::Pallet::<T>::remaining_txfee::<BalanceOf<T>>(),
+		);
+		Ok(Pre::Batch { submitter, share, parked, liquidity_info })
 	}
 
 	fn post_dispatch_details(
 		pre: Self::Pre,
 		_info: &DispatchInfo,
 		_post_info: &PostDispatchInfoOf<RuntimeCallOf<T>>,
-		_len: usize,
-		result: &DispatchResult,
+		len: usize,
+		_result: &DispatchResult,
 	) -> Result<Weight, TransactionValidityError> {
-		let pres = match pre {
-			Pre::Using(pres) => pres,
-			Pre::NotUsing(unspent) => return Ok(unspent),
+		let (submitter, share, parked, liquidity_info) = match pre {
+			Pre::Other => return Ok(Weight::zero()),
+			Pre::Batch { submitter, share, parked, liquidity_info } => {
+				(submitter, share, parked, liquidity_info)
+			},
 		};
-		// This is left behind if the call failed, so it needs to be cleared.
-		MultiOrigins::<T>::kill();
-		// The call records the items' post infos only when it succeeds. If it failed, every
-		// item is settled at its worst case, like a failed regular transaction.
-		let post_infos = match MultiOriginPostInfos::<T>::take() {
-			Some(post_infos) if post_infos.len() == pres.len() => post_infos,
-			_ => alloc::vec![PostDispatchInfo::default(); pres.len()],
-		};
+		// Refund the pipelines and bytes of the items which were free.
+		let (free_weight, free_len) = RefundableShare::<T>::take().unwrap_or_default();
+		let paid_for =
+			DispatchInfo { call_weight: share.call_weight.saturating_sub(free_weight), ..share };
+		let paid_len = (len as u32).saturating_sub(free_len);
+		let tip = Zero::zero();
+		let fee = pallet_transaction_payment::Pallet::<T>::compute_fee(paid_len, &paid_for, tip);
 
-		let mut unspent = Weight::zero();
-		for ((item_pre, info, len), mut post_info) in pres.into_iter().zip(post_infos) {
-			post_info.set_extension_weight(&info);
-			let before = post_info.actual_weight.unwrap_or_default();
-			<T::InnerExtension as TransactionExtension<RuntimeCallOf<T>>>::post_dispatch(
-				item_pre,
-				&info,
-				&mut post_info,
-				len,
-				result,
-			)?;
-			// What the item's pipeline refunded is unspent weight of this extension.
-			let after = post_info.actual_weight.unwrap_or(before);
-			unspent = unspent.saturating_add(before.saturating_sub(after));
+		if let Some(credit) = parked {
+			pallet_transaction_payment::Pallet::<T>::deposit_txfee(credit);
 		}
-
-		Ok(unspent)
+		let paid = PostDispatchInfo { actual_weight: None, pays_fee: Pays::Yes };
+		PaymentOf::<T>::correct_and_deposit_fee(
+			&submitter,
+			&share,
+			&paid,
+			fee,
+			tip,
+			liquidity_info,
+		)?;
+		pallet_transaction_payment::Pallet::<T>::deposit_fee_paid_event(submitter, fee, tip);
+		Ok(Weight::zero())
 	}
 }
