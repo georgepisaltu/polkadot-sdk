@@ -43,7 +43,7 @@ pub trait WeightInfo {
 /// Weights for `pallet_utility_ext` using the Substrate node and recommended hardware.
 pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
-	/// The range of component `c` is `[0, 8]`.
+	/// The range of component `c` is `[1, 8]`.
 	/// The range of component `b` is `[0, 3932160]`.
 	fn batch_multi_origin(c: u32, b: u32, ) -> Weight {
 		// Proof Size summary in bytes:
@@ -62,7 +62,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 
 // For backwards compatibility and tests.
 impl WeightInfo for () {
-	/// The range of component `c` is `[0, 8]`.
+	/// The range of component `c` is `[1, 8]`.
 	/// The range of component `b` is `[0, 3932160]`.
 	fn batch_multi_origin(c: u32, b: u32, ) -> Weight {
 		// Proof Size summary in bytes:

@@ -63,7 +63,6 @@ pub mod example {
 		#[pallet::authorize(Self::authorize_claim)]
 		pub fn claim(origin: OriginFor<T>) -> DispatchResult {
 			ensure_authorized(origin)?;
-			Claimed::<T>::put(true);
 			Claims::<T>::mutate(|n| *n += 1);
 			Ok(())
 		}
@@ -120,16 +119,13 @@ pub mod example {
 	#[pallet::storage]
 	pub type CouncilCalls<T: Config> = StorageValue<_, u32, ValueQuery>;
 
-	#[pallet::storage]
-	pub type Claimed<T: Config> = StorageValue<_, bool, ValueQuery>;
-
 	/// How many times `claim` was dispatched.
 	#[pallet::storage]
 	pub type Claims<T: Config> = StorageValue<_, u32, ValueQuery>;
 
 	impl<T: Config> Pallet<T> {
 		pub fn authorize_claim(_source: TransactionSource) -> TransactionValidityWithRefund {
-			if Claimed::<T>::get() {
+			if Claims::<T>::get() > 0 {
 				return Err(InvalidTransaction::Stale.into());
 			}
 			let validity =
@@ -595,6 +591,36 @@ mod multi_origin {
 		}
 	}
 
+	/// The runtime's pipeline without [`RefundFreeItems`].
+	type PlainExtension = (
+		frame_system::CheckNonce<Test>,
+		frame_system::CheckWeight<Test>,
+		ChargeTransactionPayment<Test>,
+	);
+	type PlainExtrinsic =
+		sp_runtime::generic::UncheckedExtrinsic<u64, RuntimeCall, TestSignature, PlainExtension>;
+
+	/// Apply `call` signed by `who` with their current nonce through the plain pipeline. Returns
+	/// what the call returned, the transaction's length and what `who` paid.
+	fn apply_plain(who: u64, call: RuntimeCall) -> (PostDispatchInfo, usize, u64) {
+		let ext: PlainExtension = (
+			frame_system::CheckNonce::from(System::account_nonce(who)),
+			frame_system::CheckWeight::new(),
+			ChargeTransactionPayment::from(0),
+		);
+		let payload = SignedPayload::new(call.clone(), ext.clone())
+			.expect("implicit data is available")
+			.using_encoded(|payload| payload.to_vec());
+		let uxt = PlainExtrinsic::new_signed(call, who, TestSignature(who, payload), ext);
+		let info = uxt.get_dispatch_info();
+		let len = uxt.encoded_size();
+		let xt =
+			<PlainExtrinsic as Checkable<IdentityLookup<u64>>>::check(uxt, &Default::default())
+				.expect("test signatures check");
+		let post_info = xt.apply::<Test>(&info, len).unwrap().unwrap();
+		(post_info, len, fee_paid_by(who))
+	}
+
 	fn tx_ext(nonce: u32) -> TxExtension {
 		(
 			frame_system::CheckNonce::from(nonce),
@@ -1038,7 +1064,7 @@ mod multi_origin {
 			assert_eq!(balance(2), INITIAL_BALANCE);
 			assert_eq!(System::account_nonce(1), 0);
 			assert_eq!(System::account_nonce(2), 0);
-			assert!(!example::Claimed::<Test>::get());
+			assert_eq!(example::Claims::<Test>::get(), 0);
 		});
 	}
 
@@ -1447,8 +1473,8 @@ mod multi_origin {
 
 	#[test]
 	fn item_implication_encoding_is_stable() {
-		// Wallets build this payload themselves: prefix, mode, submitter, nonce, index, hash of
-		// the SCALE encoded list of `(call, origin)` pairs.
+		// The encoding is part of the signing contract and must not change: prefix, mode,
+		// submitter, nonce, index, hash of the SCALE encoded list of `(call, origin)` pairs.
 		let call = call_remark();
 		let origin = signed_by(1);
 		let items_hash = Pallet::<Test>::items_hash([(&call, &origin), (&call, &origin)]);
@@ -1565,13 +1591,6 @@ mod multi_origin {
 
 	#[test]
 	fn without_the_refund_extension_free_items_are_paid_for() {
-		type Plain = (
-			frame_system::CheckNonce<Test>,
-			frame_system::CheckWeight<Test>,
-			ChargeTransactionPayment<Test>,
-		);
-		type PlainExtrinsic =
-			sp_runtime::generic::UncheckedExtrinsic<u64, RuntimeCall, TestSignature, Plain>;
 		new_test_ext().execute_with(|| {
 			let specs = [spec(call_free(false), SetOrigin::signed(1))];
 			let call = batch_call(
@@ -1579,66 +1598,121 @@ mod multi_origin {
 				0,
 				build_items(3, 0, BatchMode::StopAtFailure, &specs),
 			);
-			let ext: Plain = (
-				frame_system::CheckNonce::from(0),
-				frame_system::CheckWeight::new(),
-				ChargeTransactionPayment::from(0),
-			);
-			let payload = SignedPayload::new(call.clone(), ext.clone())
-				.unwrap()
-				.using_encoded(|payload| payload.to_vec());
-			let uxt = PlainExtrinsic::new_signed(call, 3, TestSignature(3, payload), ext);
-			let info = uxt.get_dispatch_info();
-			let len = uxt.encoded_size();
-			let xt =
-				<PlainExtrinsic as Checkable<IdentityLookup<u64>>>::check(uxt, &Default::default())
-					.unwrap();
-
-			let post_info = xt.apply::<Test>(&info, len).unwrap().unwrap();
-			assert_eq!(fee_paid_by(3), fee(post_info.actual_weight.unwrap(), len));
+			let (post_info, len, paid) = apply_plain(3, call);
+			assert_eq!(paid, fee(post_info.actual_weight.unwrap(), len));
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
 			assert!(RefundableShare::<Test>::get().is_some());
 		});
 	}
 
 	#[test]
-	fn wallets_get_the_signing_payload() {
+	fn stale_refundable_share_is_cleared_even_when_the_batch_fails() {
 		new_test_ext().execute_with(|| {
-			let specs = [
-				spec(call_transfer(4, 100), SetOrigin::signed(1)),
-				spec(call_transfer(4, 100), SetOrigin::signed(2)),
-			];
-			let mode = BatchMode::StopAtFailure;
-			let uxt = batch_tx(3, mode, &specs);
-			let items = items_of(&uxt.function);
-			let pairs = || items.iter().map(|item| (&item.call, &item.origin));
-			let items_hash = Pallet::<Test>::items_hash(pairs());
-			for (index, item) in items.iter().enumerate() {
-				let index = index as u32;
-				let implication = ItemImplication {
-					mode,
-					submitter: &3u64,
-					nonce: 0u32,
-					index,
-					items_hash: &items_hash,
-				};
-				// The rest of the pipeline after the authorizing extension, with no implicit data.
-				let (_, set_origin, authorize, nonce) = item.extension.clone();
-				let rest = (set_origin, authorize, nonce);
-				let payload = Pallet::<Test>::item_signing_payload(
-					mode,
-					&3,
-					0,
-					index,
-					pairs(),
-					&rest.encode(),
-					&rest.implicit().unwrap().encode(),
-				);
-				let mut expected = implication.encode();
-				expected.extend(rest.encode());
-				assert_eq!(payload, expected);
-			}
+			RefundableShare::<Test>::put((Weight::MAX, u32::MAX));
+			let specs = [spec(call_free(false), SetOrigin::signed(1))];
+			let items = build_items(3, 0, BatchMode::StopAtFailure, &specs);
+			// The wrong nonce: the call fails before writing the share.
+			let uxt = signed_tx(3, batch_call(BatchMode::StopAtFailure, 5, items));
+			let len = uxt.encoded_size();
+			let base = Pallet::<Test>::overhead_weight(0, 0) + outer_weight(&uxt);
+
+			let err = apply(uxt).unwrap().unwrap_err();
+
+			assert_eq!(err.error, Error::<Test>::BadNonce.into());
+			assert_eq!(fee_paid_by(3), fee(base, len));
+			assert_fee_credit_empty();
 		});
+	}
+
+	#[test]
+	fn nested_batch_is_paid_in_full_and_leaves_its_share_behind() {
+		new_test_ext().execute_with(|| {
+			let inner = batch_call(
+				BatchMode::StopAtFailure,
+				0,
+				build_items(
+					3,
+					0,
+					BatchMode::StopAtFailure,
+					&[spec(call_free(false), SetOrigin::signed(1))],
+				),
+			);
+			let uxt =
+				signed_tx(3, RuntimeCall::Utility(UtilityCall::batch_all { calls: vec![inner] }));
+			let len = uxt.encoded_size();
+
+			let post_info = apply(uxt).unwrap().unwrap();
+
+			// The nonce check passes: the outer `CheckNonce` bumped 3's nonce. The free item is
+			// not refunded: the transaction's call is not a batch.
+			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
+			assert_eq!(System::account_nonce(1), 1);
+			assert_eq!(fee_paid_by(3), fee(post_info.actual_weight.unwrap(), len));
+			assert!(RefundableShare::<Test>::get().is_some());
+			// The next batch transaction clears it.
+			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
+			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
+			let batch_fee = full_fee(&uxt);
+			apply_ok(uxt);
+			assert_eq!(fee_paid_by(3), batch_fee);
+			assert_fee_credit_empty();
+		});
+	}
+
+	#[test]
+	fn each_batch_refunds_its_own_free_items() {
+		new_test_ext().execute_with(|| {
+			let specs = [spec(call_free(false), SetOrigin::signed(1))];
+			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
+			let free_fee = full_fee(&uxt);
+			apply_ok(uxt);
+			assert!(fee_paid_by(3) < free_fee);
+
+			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
+			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
+			let paying_fee = full_fee(&uxt);
+			apply_ok(uxt);
+			assert_eq!(fee_paid_by(3), paying_fee);
+			assert_fee_credit_empty();
+		});
+	}
+
+	#[test]
+	fn refund_extension_passes_other_transactions_through() {
+		new_test_ext().execute_with(|| {
+			// The same transactions through the wrapped and the plain pipeline, by accounts with
+			// the same balance.
+			for (call, wrapped, plain) in [(call_free(false), 1, 2), (call_transfer(4, 100), 3, 5)]
+			{
+				let post_info = apply(signed_tx(wrapped, call.clone())).unwrap().unwrap();
+				let paid = fee_paid_by(wrapped);
+				let (plain_post_info, _, plain_paid) = apply_plain(plain, call);
+				assert_eq!(post_info, plain_post_info);
+				assert_eq!(paid, plain_paid);
+				assert_eq!(balance(wrapped), balance(plain));
+			}
+			assert_eq!(fee_paid_by(1), 0);
+			assert!(fee_paid_by(3) > 0);
+			assert_fee_credit_empty();
+		});
+	}
+
+	#[test]
+	fn refund_extension_is_invisible() {
+		type Inner = ChargeTransactionPayment<Test>;
+		type Wrapped = RefundFreeItems<Test, Inner>;
+		assert_eq!(
+			<Wrapped as TransactionExtension<RuntimeCall>>::IDENTIFIER,
+			<Inner as TransactionExtension<RuntimeCall>>::IDENTIFIER
+		);
+		assert_eq!(scale_info::meta_type::<Wrapped>(), scale_info::meta_type::<Inner>());
+		let (wrapped, inner) = (Wrapped::metadata(), Inner::metadata());
+		assert_eq!(
+			wrapped.iter().map(|m| (m.identifier, m.ty, m.implicit)).collect::<Vec<_>>(),
+			inner.iter().map(|m| (m.identifier, m.ty, m.implicit)).collect::<Vec<_>>()
+		);
+		assert_eq!(Wrapped::from(Inner::from(7)).encode(), Inner::from(7).encode());
+		assert_eq!(Wrapped::from(Inner::from(7)).implicit(), Inner::from(7).implicit());
 	}
 
 	#[test]
@@ -1673,7 +1747,7 @@ mod multi_origin {
 			assert_eq!(SetOrigin::prepared(), 0);
 			assert_eq!(System::account_nonce(1), 0);
 
-			// A submitter who cannot pay does not.
+			// A submitter who cannot pay is rejected.
 			assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), 3, 1));
 			assert_eq!(validate(uxt), Err(InvalidTransaction::Payment.into()));
 		});

@@ -27,23 +27,22 @@ use frame_support::{
 use scale_info::{StaticTypeInfo, TypeInfo};
 use sp_runtime::{
 	traits::{Implication, TransactionExtension, TransactionExtensionMetadata, ValidateResult},
-	transaction_validity::TransactionValidityError,
+	transaction_validity::{TransactionValidity, TransactionValidityError},
 	DispatchResult, Weight,
 };
 
 type RuntimeCallOf<T> = <T as frame_system::Config>::RuntimeCall;
 type RuntimeOriginOf<T> = <T as frame_system::Config>::RuntimeOrigin;
 
-/// Wraps the runtime's fee payment extension `S` so that it charges the submitter of a
-/// multi-origin batch without the share of the items whose dispatch returned `Pays::No`: `S`
-/// settles the fee as if the batch had used that much less weight and bytes, which
-/// [`RefundableShare`] carries from the batch call to `post_dispatch`. The weight the rest of the
-/// pipeline sees is unchanged, so the block accounts for the free items. Other transactions go
-/// through to `S` untouched.
+/// Wraps the runtime's fee payment extension `S` so that, for a multi-origin batch, `S` settles
+/// the fee on a `post_info` and `len` reduced by the weight and bytes in [`RefundableShare`]. The
+/// real `post_info` is not changed, so the rest of the pipeline accounts for that weight. Other
+/// transactions go through to `S` unchanged.
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, Eq, PartialEq)]
 pub struct RefundFreeItems<T, S>(pub S, PhantomData<T>);
 
-// Invisible from the outside, like the wrapped extension's metadata, identifier and implicit.
+// Type info, metadata, identifier and implicit are `S`'s, so the wrapper is invisible from the
+// outside.
 impl<T, S: StaticTypeInfo> TypeInfo for RefundFreeItems<T, S> {
 	type Identity = S;
 	fn type_info() -> scale_info::Type {
@@ -125,16 +124,40 @@ impl<T: Config + Send + Sync, S: TransactionExtension<RuntimeCallOf<T>>>
 		len: usize,
 		result: &DispatchResult,
 	) -> Result<Weight, TransactionValidityError> {
-		let (free_weight, free_len) = if batch {
-			RefundableShare::<T>::take().unwrap_or_default()
-		} else {
-			Default::default()
-		};
+		if !batch {
+			return S::post_dispatch_details(pre, info, post_info, len, result);
+		}
+		let (free_weight, free_len) = RefundableShare::<T>::take().unwrap_or_default();
 		let charged = PostDispatchInfo {
 			actual_weight: Some(post_info.calc_actual_weight(info).saturating_sub(free_weight)),
 			pays_fee: post_info.pays_fee,
 		};
 		let len = (len as u32).saturating_sub(free_len) as usize;
 		S::post_dispatch_details(pre, info, &charged, len, result)
+	}
+
+	fn bare_validate(
+		call: &RuntimeCallOf<T>,
+		info: &DispatchInfo,
+		len: usize,
+	) -> TransactionValidity {
+		S::bare_validate(call, info, len)
+	}
+
+	fn bare_validate_and_prepare(
+		call: &RuntimeCallOf<T>,
+		info: &DispatchInfo,
+		len: usize,
+	) -> Result<(), TransactionValidityError> {
+		S::bare_validate_and_prepare(call, info, len)
+	}
+
+	fn bare_post_dispatch(
+		info: &DispatchInfo,
+		post_info: &mut PostDispatchInfo,
+		len: usize,
+		result: &DispatchResult,
+	) -> Result<(), TransactionValidityError> {
+		S::bare_post_dispatch(info, post_info, len, result)
 	}
 }

@@ -502,7 +502,7 @@ impl pallet_utility_ext::BenchmarkHelper<Runtime> for MultiOriginBenchmarkHelper
 	fn setup() -> OriginCaller {
 		use frame_support::traits::fungible::Mutate;
 		let (_, account) = Self::key();
-		let _ = <Balances as Mutate<AccountId>>::set_balance(&account, 1_000_000 * DOLLARS);
+		let _ = <Balances as Mutate<AccountId>>::set_balance(&account, ExistentialDeposit::get());
 		OriginCaller::system(frame_system::RawOrigin::Signed(account))
 	}
 
@@ -4116,34 +4116,6 @@ pallet_revive::impl_runtime_apis_plus_revive_traits!(
 		}
 	}
 
-	impl pallet_utility_ext::runtime_api::MultiOriginBatchApi<
-		Block,
-		AccountId,
-		Nonce,
-		RuntimeCall,
-		OriginCaller,
-	> for Runtime {
-		fn item_signing_payload(
-			mode: pallet_utility_ext::BatchMode,
-			submitter: AccountId,
-			nonce: Nonce,
-			index: u32,
-			items: Vec<(RuntimeCall, OriginCaller)>,
-			explicit: Vec<u8>,
-			implicit: Vec<u8>,
-		) -> Vec<u8> {
-			UtilityExt::item_signing_payload(
-				mode,
-				&submitter,
-				nonce,
-				index,
-				items.iter().map(|(call, origin)| (call, origin)),
-				&explicit,
-				&implicit,
-			)
-		}
-	}
-
 	impl pallet_transaction_payment_rpc_runtime_api::TransactionPaymentCallApi<Block, Balance, RuntimeCall>
 		for Runtime
 	{
@@ -4519,13 +4491,12 @@ mod tests {
 		};
 		use frame_support::dispatch::GetDispatchInfo;
 		use pallet_utility_ext::{
-			runtime_api::runtime_decl_for_multi_origin_batch_api::MultiOriginBatchApiV1, BatchMode,
-			Event as UtilityExtEvent, ItemError, ItemImplication, MultiOriginItem,
+			BatchMode, Event as UtilityExtEvent, ItemError, ItemImplication, MultiOriginItem,
 		};
 		use sp_core::{sr25519, Pair as _};
 		use sp_io::hashing::blake2_256;
 		use sp_runtime::{
-			traits::{Applyable, Checkable, TransactionExtension as _},
+			traits::{Applyable, Checkable},
 			transaction_validity::{
 				InvalidTransaction, TransactionSource, TransactionValidityError,
 			},
@@ -4634,24 +4605,6 @@ mod tests {
 				items_hash: &items_hash,
 			};
 			let payload = signing_payload(implication.encode(), &rest);
-			// What the runtime API tells wallets to sign.
-			let implicit = rest.implicit().expect("implicit data is available; qed");
-			let from_api = <Runtime as MultiOriginBatchApiV1<
-				Block,
-				AccountId,
-				Nonce,
-				RuntimeCall,
-				OriginCaller,
-			>>::item_signing_payload(
-				batch.mode,
-				batch.submitter.clone(),
-				batch.nonce,
-				index as u32,
-				batch.specs.to_vec(),
-				rest.encode(),
-				implicit.encode(),
-			);
-			assert_eq!(from_api, payload);
 			let signature = MultiSignature::Sr25519(signer.sign(&blake2_256(&payload)));
 			let extension = item_extension(
 				pallet_verify_signature::VerifySignature::new_with_signature(signature, account),
@@ -5207,13 +5160,18 @@ mod tests {
 			let mut ext = new_test_ext(&[dave_account.clone()]);
 			ext.register_extension(KeystoreExt::new(MemoryKeystore::new()));
 			ext.execute_with(|| {
+				// The benchmark's shape: the maximum number of items, the first one large, which
+				// the submitter has to be able to pay for.
+				let _ = Balances::deposit_creating(&dave_account, 1_000_000 * DOLLARS);
 				let origin = MultiOriginBenchmarkHelper::setup();
-				let remark = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
-				let specs = vec![(remark.clone(), origin.clone()); 3];
+				let remark =
+					|len| RuntimeCall::System(frame_system::Call::remark { remark: vec![0; len] });
+				let mut specs = vec![(remark(0), origin.clone()); 8];
+				specs[0].0 = remark(1024 * 1024);
 				let batch = stop_batch(&dave_account, &specs);
 				let items_hash =
 					UtilityExt::items_hash(specs.iter().map(|(call, origin)| (call, origin)));
-				let items = (0..3)
+				let items = (0..8)
 					.map(|index| {
 						let implication = ItemImplication {
 							mode: batch.mode,
@@ -5223,22 +5181,17 @@ mod tests {
 							items_hash: &items_hash,
 						};
 						MultiOriginBenchmarkHelper::item(
-							remark.clone(),
+							specs[index as usize].0.clone(),
 							index,
 							implication.encode(),
 						)
 					})
 					.collect();
 				assert_eq!(apply(batch_tx(&dave, &batch, items)), Ok(Ok(())));
-				assert_eq!(
-					batch_events(),
-					vec![
-						UtilityExtEvent::ItemCompleted { index: 0 },
-						UtilityExtEvent::ItemCompleted { index: 1 },
-						UtilityExtEvent::ItemCompleted { index: 2 },
-						UtilityExtEvent::BatchCompleted,
-					]
-				);
+				let mut expected: Vec<_> =
+					(0..8).map(|index| UtilityExtEvent::ItemCompleted { index }).collect();
+				expected.push(UtilityExtEvent::BatchCompleted);
+				assert_eq!(batch_events(), expected);
 			});
 		}
 

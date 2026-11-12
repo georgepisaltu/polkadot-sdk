@@ -21,7 +21,7 @@
 //! call, which the batch also charges through the items' declared weights, so the overhead is
 //! overestimated by roughly one cheap signed transaction per item. This is deliberate: it errs in
 //! the safe direction and a weightless pipeline would not exercise the code the batch runs. The
-//! bytes component covers hashing the encoded items.
+//! bytes component covers encoding and hashing the items.
 
 #![cfg(feature = "runtime-benchmarks")]
 
@@ -75,10 +75,10 @@ mod benchmark {
 	/// Both batch calls run the same code, so this is the weight of both.
 	#[benchmark]
 	fn batch_multi_origin(
-		c: Linear<0, { T::MaxMultiOriginBatch::get() }>,
+		c: Linear<1, { T::MaxMultiOriginBatch::get() }>,
 		b: Linear<0, { *T::BlockLength::get().max.get(DispatchClass::Normal) }>,
 	) {
-		let (submitter, nonce, items) = batch::<T>(c, if c == 0 { 0 } else { b });
+		let (submitter, nonce, items) = batch::<T>(c, b);
 
 		#[extrinsic_call]
 		_(frame_system::RawOrigin::Signed(submitter), items, nonce);
