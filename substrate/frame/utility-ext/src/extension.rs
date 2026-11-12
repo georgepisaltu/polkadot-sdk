@@ -15,7 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The transaction extension refunding the submitter of a multi-origin batch for its free items.
+//! The pallet's transaction extension.
 
 use crate::{Config, Pallet, RefundableShare};
 use codec::{Decode, DecodeWithMemTracking, Encode};
@@ -34,26 +34,27 @@ use sp_runtime::{
 type RuntimeCallOf<T> = <T as frame_system::Config>::RuntimeCall;
 type RuntimeOriginOf<T> = <T as frame_system::Config>::RuntimeOrigin;
 
-/// Wraps the runtime's fee payment extension `S` so that, for a multi-origin batch, `S` settles
-/// the fee on a `post_info` and `len` reduced by the weight and bytes in [`RefundableShare`]. The
-/// real `post_info` is not changed, so the rest of the pipeline accounts for that weight. Other
-/// transactions go through to `S` unchanged.
+/// The pallet's transaction extension, wrapping the runtime's fee payment extension `S` in its
+/// slot of the pipeline. For a multi-origin batch, `S` settles the fee on a `post_info` and `len`
+/// reduced by the weight and bytes in [`RefundableShare`]. The real `post_info` is not changed,
+/// so the rest of the pipeline accounts for that weight. Other transactions go through to `S`
+/// unchanged.
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, Eq, PartialEq)]
-pub struct RefundFreeItems<T, S>(pub S, PhantomData<T>);
+pub struct MultiOriginBatch<T, S>(pub S, PhantomData<T>);
 
 // Type info, metadata, identifier and implicit are `S`'s, so the wrapper is invisible from the
 // outside.
-impl<T, S: StaticTypeInfo> TypeInfo for RefundFreeItems<T, S> {
+impl<T, S: StaticTypeInfo> TypeInfo for MultiOriginBatch<T, S> {
 	type Identity = S;
 	fn type_info() -> scale_info::Type {
 		S::type_info()
 	}
 }
 
-impl<T, S: Encode> core::fmt::Debug for RefundFreeItems<T, S> {
+impl<T, S: Encode> core::fmt::Debug for MultiOriginBatch<T, S> {
 	#[cfg(feature = "std")]
 	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-		write!(f, "RefundFreeItems<{:?}>", self.0.encode())
+		write!(f, "MultiOriginBatch<{:?}>", self.0.encode())
 	}
 	#[cfg(not(feature = "std"))]
 	fn fmt(&self, _: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -61,14 +62,14 @@ impl<T, S: Encode> core::fmt::Debug for RefundFreeItems<T, S> {
 	}
 }
 
-impl<T, S> From<S> for RefundFreeItems<T, S> {
+impl<T, S> From<S> for MultiOriginBatch<T, S> {
 	fn from(s: S) -> Self {
 		Self(s, PhantomData)
 	}
 }
 
 impl<T: Config + Send + Sync, S: TransactionExtension<RuntimeCallOf<T>>>
-	TransactionExtension<RuntimeCallOf<T>> for RefundFreeItems<T, S>
+	TransactionExtension<RuntimeCallOf<T>> for MultiOriginBatch<T, S>
 {
 	const IDENTIFIER: &'static str = S::IDENTIFIER;
 	type Implicit = S::Implicit;

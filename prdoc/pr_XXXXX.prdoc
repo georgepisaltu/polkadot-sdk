@@ -40,8 +40,8 @@ doc:
       `WeightReclaim`). With the `runtime-benchmarks` feature, a benchmark helper building items
       of that type is required as well.
 
-    The pallet's `RefundFreeItems` transaction extension wraps the runtime's fee payment
-    extension in the overarching `TransactionExtension`. The fee payment extension charges the
+    The pallet's `MultiOriginBatch` transaction extension wraps the runtime's fee payment
+    extension in its slot of the overarching `TransactionExtension`. The fee payment extension charges the
     submitter for the batch like for any transaction, and the wrapper makes it settle the fee
     without the weight and bytes of the items whose dispatch returned `Pays::No`, leaving the
     weight the block accounts for unchanged. Calls relying on the transient fee credit of

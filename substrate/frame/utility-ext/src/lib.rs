@@ -42,10 +42,11 @@
 //!
 //! The submitter pays for the whole batch like for any transaction: the overhead, the items'
 //! pipelines and calls and the transaction's length, through the runtime's fee payment extension,
-//! wrapped in [`RefundFreeItems`] so that it refunds the share of the items whose dispatch returned
-//! `Pays::No`, their weight and their bytes, as such calls cost nobody anything as transactions of
-//! their own. Only `Pays::No` counts: a call feeless through `pallet_skip_feeless_payment` is paid
-//! for as an item. Items pay nothing and their pipelines must not charge fees.
+//! which the pallet's [`MultiOriginBatch`] extension wraps so that it refunds the share of the
+//! items whose dispatch returned `Pays::No`, their weight and their bytes, as such calls cost
+//! nobody anything as transactions of their own. Only `Pays::No` counts: a call feeless through
+//! `pallet_skip_feeless_payment` is paid for as an item. Items pay nothing and their pipelines must
+//! not charge fees.
 //!
 //! Items are signed over the [`ItemImplication`] of their batch, which binds them to the
 //! submitter, the submitter's nonce, the batch mode, their position and the other items, so an
@@ -90,7 +91,7 @@ use sp_runtime::{
 };
 pub use weights::WeightInfo;
 
-pub use extension::RefundFreeItems;
+pub use extension::MultiOriginBatch;
 pub use pallet::*;
 
 type RuntimeCallOf<T> = <T as frame_system::Config>::RuntimeCall;
@@ -277,7 +278,7 @@ pub mod pallet {
 	}
 
 	/// The weight and encoded length of the items of the last batch whose dispatch returned
-	/// `Pays::No`, consumed by [`RefundFreeItems`] in `post_dispatch` when the batch is the
+	/// `Pays::No`, consumed by [`MultiOriginBatch`] in `post_dispatch` when the batch is the
 	/// transaction's call. A batch dispatched any other way leaves it behind until the next batch
 	/// transaction clears it in `prepare`. Whitelisted, so its operations are not benchmarked.
 	#[pallet::storage]
@@ -372,15 +373,13 @@ pub mod pallet {
 			nonce: NonceOf<T>,
 			mode: BatchMode,
 		) -> DispatchResultWithPostInfo {
-			let base = Self::overhead_weight(0, 0);
-			let submitter = ensure_signed(origin).map_err(|e| e.with_weight(base))?;
+			let overhead = Self::overhead_weight(items.len() as u32, items.encoded_size() as u32);
+			let submitter = ensure_signed(origin).map_err(|e| e.with_weight(overhead))?;
 			// `CheckNonce` bumped the nonce of the transaction in `prepare`.
 			let bumped = nonce.checked_add(&One::one());
 			if bumped != Some(frame_system::Pallet::<T>::account_nonce(&submitter)) {
-				return Err(Error::<T>::BadNonce.with_weight(base));
+				return Err(Error::<T>::BadNonce.with_weight(overhead));
 			}
-			let count = items.len() as u32;
-			let bytes = items.encoded_size() as u32;
 			let items_hash = Self::items_hash(items.iter().map(|item| (&item.call, &item.origin)));
 
 			let mut weight = Weight::zero();
@@ -424,7 +423,7 @@ pub mod pallet {
 			if free_len != 0 {
 				RefundableShare::<T>::put((free_weight, free_len));
 			}
-			Ok(Some(Self::overhead_weight(count, bytes).saturating_add(weight)).into())
+			Ok(Some(overhead.saturating_add(weight)).into())
 		}
 
 		/// Apply an item in a storage transaction rolled back if the item is invalid. Returns the

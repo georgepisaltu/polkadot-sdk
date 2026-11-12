@@ -137,7 +137,7 @@ pub fn create_extrinsic(
 		)),
 		frame_system::CheckNonce::<kitchensink_runtime::Runtime>::from(nonce),
 		frame_system::CheckWeight::<kitchensink_runtime::Runtime>::new(),
-		pallet_utility_ext::RefundFreeItems::from(
+		pallet_utility_ext::MultiOriginBatch::from(
 			pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 				pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::<
 					kitchensink_runtime::Runtime,
@@ -1134,7 +1134,7 @@ mod tests {
 				let check_era = frame_system::CheckEra::from(Era::Immortal);
 				let check_nonce = frame_system::CheckNonce::from(index);
 				let check_weight = frame_system::CheckWeight::new();
-				let tx_payment = pallet_utility_ext::RefundFreeItems::from(
+				let tx_payment = pallet_utility_ext::MultiOriginBatch::from(
 					pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 						pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::from(0, None),
 					),

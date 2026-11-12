@@ -1803,7 +1803,7 @@ where
 			frame_system::CheckEra::<Runtime>::from(era),
 			frame_system::CheckNonce::<Runtime>::from(nonce),
 			frame_system::CheckWeight::<Runtime>::new(),
-			pallet_utility_ext::RefundFreeItems::from(
+			pallet_utility_ext::MultiOriginBatch::from(
 				pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 					pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::<Runtime>::from(
 						tip, None,
@@ -1865,7 +1865,7 @@ where
 			frame_system::CheckEra::<Runtime>::from(Era::Immortal),
 			frame_system::CheckNonce::<Runtime>::from(0),
 			frame_system::CheckWeight::<Runtime>::new(),
-			pallet_utility_ext::RefundFreeItems::from(
+			pallet_utility_ext::MultiOriginBatch::from(
 				pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 					pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::<Runtime>::from(
 						0, None,
@@ -3385,7 +3385,7 @@ pub type TxExtension = (
 	frame_system::CheckEra<Runtime>,
 	frame_system::CheckNonce<Runtime>,
 	frame_system::CheckWeight<Runtime>,
-	pallet_utility_ext::RefundFreeItems<
+	pallet_utility_ext::MultiOriginBatch<
 		Runtime,
 		pallet_skip_feeless_payment::SkipCheckIfFeeless<
 			Runtime,
@@ -3415,7 +3415,7 @@ impl EthExtra for EthExtraImpl {
 			frame_system::CheckEra::from(crate::generic::Era::Immortal),
 			frame_system::CheckNonce::<Runtime>::from(nonce),
 			frame_system::CheckWeight::<Runtime>::new(),
-			pallet_utility_ext::RefundFreeItems::from(
+			pallet_utility_ext::MultiOriginBatch::from(
 				pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 					pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::<Runtime>::from(
 						tip, None,
@@ -4625,7 +4625,7 @@ mod tests {
 				frame_system::CheckEra::from(Era::Immortal),
 				frame_system::CheckNonce::from(nonce),
 				frame_system::CheckWeight::new(),
-				pallet_utility_ext::RefundFreeItems::from(
+				pallet_utility_ext::MultiOriginBatch::from(
 					pallet_skip_feeless_payment::SkipCheckIfFeeless::from(
 						pallet_asset_conversion_tx_payment::ChargeAssetTxPayment::from(0, asset),
 					),

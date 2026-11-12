@@ -275,7 +275,7 @@ mod multi_origin_mock {
 	pub type TxExtension = (
 		frame_system::CheckNonce<Test>,
 		frame_system::CheckWeight<Test>,
-		RefundFreeItems<Test, ChargeTransactionPayment<Test>>,
+		MultiOriginBatch<Test, ChargeTransactionPayment<Test>>,
 	);
 	pub type UncheckedExtrinsic = sp_runtime::generic::UncheckedExtrinsic<
 		u64,
@@ -591,7 +591,7 @@ mod multi_origin {
 		}
 	}
 
-	/// The runtime's pipeline without [`RefundFreeItems`].
+	/// The runtime's pipeline without [`MultiOriginBatch`].
 	type PlainExtension = (
 		frame_system::CheckNonce<Test>,
 		frame_system::CheckWeight<Test>,
@@ -625,7 +625,7 @@ mod multi_origin {
 		(
 			frame_system::CheckNonce::from(nonce),
 			frame_system::CheckWeight::new(),
-			RefundFreeItems::from(ChargeTransactionPayment::from(0)),
+			MultiOriginBatch::from(ChargeTransactionPayment::from(0)),
 		)
 	}
 
@@ -1268,13 +1268,14 @@ mod multi_origin {
 			// A general transaction has no signer and nothing in the pipeline authorizes it.
 			let uxt = UncheckedExtrinsic::new_transaction(call.clone(), tx_ext(0));
 			assert_eq!(apply(uxt), Err(InvalidTransaction::UnknownOrigin.into()));
-			// A bare one skips the pipeline; the call fails before any item, charging the base
-			// overhead.
+			// A bare one skips the pipeline; the call fails before any item, charging the
+			// overhead only.
 			let uxt = UncheckedExtrinsic::new_bare(call);
+			let overhead = overhead(&uxt);
 			assert_eq!(
 				apply(uxt).unwrap(),
 				Err(DispatchErrorWithPostInfo {
-					post_info: Some(Pallet::<Test>::overhead_weight(0, 0)).into(),
+					post_info: Some(overhead).into(),
 					error: BadOrigin.into(),
 				})
 			);
@@ -1288,9 +1289,9 @@ mod multi_origin {
 			let specs = [spec(call_remark(), SetOrigin::signed(1))];
 			let items: MultiOriginItemsOf<Test> =
 				build_items(3, 0, BatchMode::StopAtFailure, &specs).try_into().unwrap();
-			let base = Pallet::<Test>::overhead_weight(0, 0);
 			let bad_nonce = DispatchErrorWithPostInfo {
-				post_info: Some(base).into(),
+				post_info: Some(Pallet::<Test>::overhead_weight(1, items.encoded_size() as u32))
+					.into(),
 				error: Error::<Test>::BadNonce.into(),
 			};
 			// Signed, but 3 has not sent the transaction with nonce 0 yet.
@@ -1309,15 +1310,15 @@ mod multi_origin {
 			);
 
 			// A transaction carrying another nonce than its own fails before any item, charging
-			// the base overhead.
+			// the overhead only.
 			let items = build_items(3, 0, BatchMode::StopAtFailure, &specs);
 			let uxt = signed_tx(3, batch_call(BatchMode::StopAtFailure, 0, items));
 			let len = uxt.encoded_size();
-			let outer = outer_weight(&uxt);
+			let charged = overhead(&uxt) + outer_weight(&uxt);
 			let err = apply(uxt).unwrap().unwrap_err();
 			assert_eq!(err.error, Error::<Test>::BadNonce.into());
-			assert_eq!(err.post_info.actual_weight, Some(base + outer));
-			assert_eq!(fee_paid_by(3), fee(base + outer, len));
+			assert_eq!(err.post_info.actual_weight, Some(charged));
+			assert_eq!(fee_paid_by(3), fee(charged, len));
 			assert_eq!(System::account_nonce(3), 2);
 			assert_eq!(System::account_nonce(1), 1);
 		});
@@ -1590,7 +1591,7 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn without_the_refund_extension_free_items_are_paid_for() {
+	fn without_the_batch_extension_free_items_are_paid_for() {
 		new_test_ext().execute_with(|| {
 			let specs = [spec(call_free(false), SetOrigin::signed(1))];
 			let call = batch_call(
@@ -1614,12 +1615,12 @@ mod multi_origin {
 			// The wrong nonce: the call fails before writing the share.
 			let uxt = signed_tx(3, batch_call(BatchMode::StopAtFailure, 5, items));
 			let len = uxt.encoded_size();
-			let base = Pallet::<Test>::overhead_weight(0, 0) + outer_weight(&uxt);
+			let charged = overhead(&uxt) + outer_weight(&uxt);
 
 			let err = apply(uxt).unwrap().unwrap_err();
 
 			assert_eq!(err.error, Error::<Test>::BadNonce.into());
-			assert_eq!(fee_paid_by(3), fee(base, len));
+			assert_eq!(fee_paid_by(3), fee(charged, len));
 			assert_fee_credit_empty();
 		});
 	}
@@ -1678,7 +1679,7 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn refund_extension_passes_other_transactions_through() {
+	fn batch_extension_passes_other_transactions_through() {
 		new_test_ext().execute_with(|| {
 			// The same transactions through the wrapped and the plain pipeline, by accounts with
 			// the same balance.
@@ -1698,9 +1699,9 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn refund_extension_is_invisible() {
+	fn batch_extension_is_invisible() {
 		type Inner = ChargeTransactionPayment<Test>;
-		type Wrapped = RefundFreeItems<Test, Inner>;
+		type Wrapped = MultiOriginBatch<Test, Inner>;
 		assert_eq!(
 			<Wrapped as TransactionExtension<RuntimeCall>>::IDENTIFIER,
 			<Inner as TransactionExtension<RuntimeCall>>::IDENTIFIER
