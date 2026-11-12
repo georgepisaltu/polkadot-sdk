@@ -18,18 +18,16 @@
 //! Benchmarks for the Utility Extension Pallet.
 //!
 //! The items are built by [`Config::BenchmarkHelper`] with the real inner pipeline and a real
-//! call, so the measured per-item overhead includes one run of that pipeline (signature check,
-//! nonce and fee bookkeeping) and the call itself, which the batch also charges separately
-//! through the items' declared weights. The overhead is therefore overestimated by roughly one
-//! cheap signed transaction per item. This is deliberate: the error is in the safe direction, it
-//! is only ever paid by the submitter of a batch call and never by any other transaction, and a
-//! benchmark with a weightless pipeline would not exercise the code the batch really runs.
+//! call, which the batch also charges through the items' declared weights, so the overhead is
+//! overestimated by roughly one cheap signed transaction per item. This is deliberate: it errs in
+//! the safe direction and a weightless pipeline would not exercise the code the batch runs. The
+//! bytes component covers hashing the encoded items.
 
 #![cfg(feature = "runtime-benchmarks")]
 
 use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
-use frame_support::traits::Get;
+use frame_support::{dispatch::DispatchClass, traits::Get};
 
 use crate::*;
 
@@ -37,50 +35,53 @@ fn assert_last_event<T: Config>(generic_event: <T as frame_system::Config>::Runt
 	frame_system::Pallet::<T>::assert_last_event(generic_event.into());
 }
 
-/// The origin of the benchmark batches and `c` items of it, each a `remark`, signed for a batch
-/// in `mode` of the whitelisted caller with nonce 0.
-fn batch<T: Config>(c: u32, mode: BatchMode) -> (Origin<T>, MultiOriginItemsOf<T>) {
+/// The submitter of a batch, the whitelisted caller with their nonce bumped as by `CheckNonce`,
+/// the nonce it was sent with and its `c` `remark` items, the first of which carries `b` bytes.
+fn batch<T: Config>(c: u32, b: u32) -> (T::AccountId, NonceOf<T>, MultiOriginItemsOf<T>) {
 	let submitter: T::AccountId = whitelisted_caller();
-	let nonce = Default::default();
+	let nonce = frame_system::Pallet::<T>::account_nonce(&submitter);
+	frame_system::Pallet::<T>::inc_account_nonce(&submitter);
 	let origin = T::BenchmarkHelper::setup();
-	let call: RuntimeCallOf<T> = frame_system::Call::<T>::remark { remark: Vec::new() }.into();
-	let items_hash = Pallet::<T>::items_hash((0..c).map(|_| (&call, &origin)));
-	let items: Vec<_> = (0..c)
+	let calls: Vec<RuntimeCallOf<T>> = (0..c)
 		.map(|index| {
+			let remark = if index == 0 { alloc::vec![0; b as usize] } else { Vec::new() };
+			frame_system::Call::<T>::remark { remark }.into()
+		})
+		.collect();
+	let items_hash = Pallet::<T>::items_hash(calls.iter().map(|call| (call, &origin)));
+	let items: Vec<_> = calls
+		.into_iter()
+		.enumerate()
+		.map(|(index, call)| {
+			let index = index as u32;
 			let implication = ItemImplication {
-				mode,
+				mode: BatchMode::StopAtFailure,
 				submitter: &submitter,
 				nonce,
 				index,
 				items_hash: &items_hash,
 			};
-			T::BenchmarkHelper::item(call.clone(), index.into(), implication.encode())
+			T::BenchmarkHelper::item(call, index.into(), implication.encode())
 		})
 		.collect();
 	let items = items.try_into().expect("`c` is bounded by `MaxMultiOriginBatch`; qed");
-	(RawOrigin::MultiOriginBatch { submitter, nonce }, items)
+	(submitter, nonce, items)
 }
 
 #[benchmarks]
 mod benchmark {
 	use super::*;
 
+	/// Both batch calls run the same code, so this is the weight of both.
 	#[benchmark]
-	fn batch_multi_origin(c: Linear<1, { T::MaxMultiOriginBatch::get() }>) {
-		let (origin, items) = batch::<T>(c, BatchMode::Stop);
+	fn batch_multi_origin(
+		c: Linear<0, { T::MaxMultiOriginBatch::get() }>,
+		b: Linear<0, { *T::BlockLength::get().max.get(DispatchClass::Normal) }>,
+	) {
+		let (submitter, nonce, items) = batch::<T>(c, if c == 0 { 0 } else { b });
 
 		#[extrinsic_call]
-		_(origin, items);
-
-		assert_last_event::<T>(Event::BatchCompleted.into());
-	}
-
-	#[benchmark]
-	fn force_batch_multi_origin(c: Linear<1, { T::MaxMultiOriginBatch::get() }>) {
-		let (origin, items) = batch::<T>(c, BatchMode::Continue);
-
-		#[extrinsic_call]
-		_(origin, items);
+		_(frame_system::RawOrigin::Signed(submitter), items, nonce);
 
 		assert_last_event::<T>(Event::BatchCompleted.into());
 	}

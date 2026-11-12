@@ -10363,6 +10363,7 @@ dependencies = [
  "scale-info",
  "serde_json",
  "sp-debug-derive 14.0.0",
+ "sp-keystore 0.34.0",
  "static_assertions",
  "substrate-wasm-builder",
 ]
@@ -15734,7 +15735,6 @@ dependencies = [
  "frame-benchmarking",
  "frame-support",
  "frame-system",
- "log",
  "pallet-balances",
  "pallet-collective",
  "pallet-transaction-payment",

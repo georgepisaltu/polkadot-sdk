@@ -5,24 +5,27 @@ doc:
     This PR adds `pallet-utility-ext`, which allows batching calls with different origins in one
     signed transaction. The origins can be custom, they don't have to be
     `SystemOrigin::Signed(AccountId)`. This is done by supplying a number of batch items
-    consisting of a call, its inner `TransactionExtension` pipeline and its expected origin to
-    `pallet-utility-ext::batch_multi_origin` or `force_batch_multi_origin`.
+    consisting of a call, its inner `TransactionExtension` pipeline and its expected origin,
+    along with the submitter's nonce, to `pallet_utility_ext::batch_multi_origin` or
+    `force_batch_multi_origin`.
 
     The batch is a regular signed transaction of its submitter. Its call applies the items in
     sequence: each item runs its inner pipeline's `validate` and `prepare`, is dispatched and runs
-    its pipeline's `post_dispatch` before the next item starts, exactly as if it were a
-    transaction of its own included right after the previous item. An invalid item is not applied
-    and its origin pays nothing, like an invalid transaction; an item whose call fails keeps its
-    pipeline's effects (nonce, fee) while the call's effects are reverted, like a failed
-    transaction. Batches are not atomic: `batch_multi_origin` stops at the first item which is
-    invalid or fails and keeps the items before it, `force_batch_multi_origin` applies every
-    item regardless. Items are not validated in the transaction pool, only the submitter's
-    transaction is.
+    its pipeline's `post_dispatch` before the next item starts, as if it were a transaction of
+    its own included right after the previous item. An invalid item is not applied,
+    like an invalid transaction; an item whose call fails keeps its pipeline's effects (nonce)
+    while the call's effects are reverted, like a failed transaction. Batches are not atomic:
+    `batch_multi_origin` stops at the first item which is invalid or fails and keeps the items
+    before it, `force_batch_multi_origin` applies every item regardless. Items are not validated
+    in the transaction pool, only the submitter's transaction is.
 
-    The submitter pays for the batch overhead, the items' pipelines and the transaction's
-    length, the items pay for their own calls (call weight plus base extrinsic fee). Items are
-    signed over an implication binding them to the submitter, the submitter's nonce, the batch
-    mode, their position and the other items, so an item cannot be applied elsewhere.
+    The submitter pays for the whole batch like for any transaction: the overhead, the items'
+    pipelines and calls and the transaction's length. Items pay nothing. The weight and bytes of
+    items whose dispatch returns `Pays::No` are refunded to the submitter. Items are signed over an
+    implication binding them to the submitter, the submitter's nonce, the batch mode, their
+    position and the other items, so an item cannot be applied elsewhere. The call checks that
+    the nonce it carries is its transaction's, the submitter's nonce once `CheckNonce` bumped
+    it.
 
     Enabling this feature means configuring `pallet-utility-ext` in your runtime. Importantly, the
     pallet requires:
@@ -32,26 +35,21 @@ doc:
     - A call filter for which calls are allowed to be part of multi origin batches.
     - The inner `TransactionExtension` pipeline carried by each item. This is different than the
       runtime's overarching `TransactionExtension` and is meant to be a subset of the extensions
-      there, with the signature verification first and without the extensions which are supposed
-      to run only once per transaction (e.g. `CheckWeight`, `WeightReclaim`). With the
-      `runtime-benchmarks` feature, a benchmark helper building items of that type is required
-      as well.
+      there, with the signature verification first and without the fee payment extension and the
+      extensions which are supposed to run only once per transaction (e.g. `CheckWeight`,
+      `WeightReclaim`). With the `runtime-benchmarks` feature, a benchmark helper building items
+      of that type is required as well.
 
-    The pallet's `MultiOriginBatch` transaction extension goes in the overarching
-    `TransactionExtension` after `CheckNonce` and before the fee payment extension. It
-    authorizes the batch calls and charges the submitter for their share through the runtime's
-    `OnChargeTransaction`, keeping the withdrawn fee out of the transient fee credit of
-    `pallet-transaction-payment` while the items run, so the fee payment extension skips
-    batches and the items' own fee payments find that credit empty. An item whose dispatch
-    returns `Pays::No` is free for the submitter too. Calls relying on that credit belonging to
-    the transaction's signer, today the Ethereum transaction calls of `pallet_revive`, must be
-    kept out of batches by the call filter.
+    The pallet's `RefundFreeItems` transaction extension wraps the runtime's fee payment
+    extension in the overarching `TransactionExtension`. The fee payment extension charges the
+    submitter for the batch like for any transaction, and the wrapper makes it settle the fee
+    without the weight and bytes of the items whose dispatch returned `Pays::No`, leaving the
+    weight the block accounts for unchanged. Calls relying on the transient fee credit of
+    `pallet-transaction-payment` belonging to the transaction's signer, today the Ethereum
+    transaction calls of `pallet_revive`, must be kept out of batches by the call filter.
 
     For wallets, the item pipeline type is part of the pallet's metadata and the
-    `MultiOriginBatchApi` runtime API returns the pipeline's explicit and implicit data per
-    extension, the payload an item's origin authorizes and the submitter's share of the fee.
-    `TransactionExtension` gains `explicit_parts` and `implicit_parts`, with default
-    implementations, giving the encoded data of each extension of a pipeline in metadata order.
+    `MultiOriginBatchApi` runtime API returns the payload an item's origin authorizes.
     `TransactionValidityError` and its variants now derive `DecodeWithMemTracking`.
 crates:
 - name: pallet-utility-ext

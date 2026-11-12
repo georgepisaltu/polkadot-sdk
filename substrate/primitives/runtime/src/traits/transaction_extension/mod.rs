@@ -265,24 +265,6 @@ pub trait TransactionExtension<Call: Dispatchable>:
 		}]
 	}
 
-	/// The encoded explicit data of each extension of this extension, in the order of
-	/// [`metadata`](Self::metadata): one entry per extension, tuples flattened.
-	///
-	/// Together with [`implicit_parts`](Self::implicit_parts), this lets the implication which the
-	/// extension at some position sees in [`validate`](Self::validate) be rebuilt: the base
-	/// implication, followed by the explicit then the implicit data of the extensions after it.
-	fn explicit_parts(&self) -> Vec<Vec<u8>> {
-		alloc::vec![self.encode()]
-	}
-
-	/// The encoded implicit data of each extension of this extension, in the order of
-	/// [`metadata`](Self::metadata): one entry per extension, tuples flattened.
-	///
-	/// See [`explicit_parts`](Self::explicit_parts).
-	fn implicit_parts(&self) -> Result<Vec<Vec<u8>>, TransactionValidityError> {
-		Ok(alloc::vec![self.implicit()?.encode()])
-	}
-
 	/// The type that encodes information that can be passed from `validate` to `prepare`.
 	type Val;
 
@@ -566,16 +548,6 @@ impl<Call: Dispatchable> TransactionExtension<Call> for Tuple {
 		let mut ids = Vec::new();
 		for_tuples!( #( ids.extend(Tuple::metadata()); )* );
 		ids
-	}
-	fn explicit_parts(&self) -> Vec<Vec<u8>> {
-		let mut parts = Vec::new();
-		for_tuples!( #( parts.extend(Tuple.explicit_parts()); )* );
-		parts
-	}
-	fn implicit_parts(&self) -> Result<Vec<Vec<u8>>, TransactionValidityError> {
-		let mut parts = Vec::new();
-		for_tuples!( #( parts.extend(Tuple.implicit_parts()?); )* );
-		Ok(parts)
 	}
 
 	for_tuples!( type Val = ( #( Tuple::Val ),* ); );
@@ -894,26 +866,5 @@ mod test {
 			.expect("valid");
 
 		assert_eq!(res.0, ValidTransaction::default());
-
-		// The parts rebuild what each extension saw: the base, then the explicit and implicit
-		// data of the extensions after it, nesting flattened.
-		fn metadata_len<E: TransactionExtension<()>>(_: &E) -> usize {
-			E::metadata().len()
-		}
-		let explicit = ext.explicit_parts();
-		let implicit = ext.implicit_parts().unwrap();
-		assert_eq!(explicit.len(), 11);
-		assert_eq!(implicit.len(), 11);
-		assert_eq!(metadata_len(&ext), 11);
-		for position in 0..11 {
-			let mut implication = CALL_IMPLICIT.encode();
-			implication.extend(explicit[position + 1..].concat());
-			implication.extend(implicit[position + 1..].concat());
-			let counter = 2 * position as u8 + 1;
-			let mut expected = vec![CALL_IMPLICIT];
-			expected.extend(counter + 2..23);
-			expected.extend((counter + 2..23).filter(|i| i % 2 == 1));
-			assert_eq!(implication, expected);
-		}
 	}
 }

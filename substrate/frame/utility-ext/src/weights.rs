@@ -23,8 +23,8 @@
 //! HOSTNAME: `placeholder`, CPU: `placeholder`
 //! WASM-EXECUTION: `Compiled`, CHAIN: `None`, DB CACHE: `1024`
 //!
-//! NOTE: placeholder values copied from `pallet_utility::batch_all`; regenerate with the
-//! benchmark CLI before release.
+//! NOTE: placeholder values, the per-item term copied from `pallet_utility::batch_all` and the
+//! per-byte term from `frame_system::remark`; regenerate with the benchmark CLI before release.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_parens)]
@@ -37,15 +37,15 @@ use core::marker::PhantomData;
 
 /// Weight functions needed for `pallet_utility_ext`.
 pub trait WeightInfo {
-	fn batch_multi_origin(c: u32, ) -> Weight;
-	fn force_batch_multi_origin(c: u32, ) -> Weight;
+	fn batch_multi_origin(c: u32, b: u32, ) -> Weight;
 }
 
 /// Weights for `pallet_utility_ext` using the Substrate node and recommended hardware.
 pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 	/// The range of component `c` is `[0, 8]`.
-	fn batch_multi_origin(c: u32, ) -> Weight {
+	/// The range of component `b` is `[0, 3932160]`.
+	fn batch_multi_origin(c: u32, b: u32, ) -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `3997`
@@ -53,18 +53,8 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(4_075_000, 3997)
 			// Standard Error: 2_176
 			.saturating_add(Weight::from_parts(5_127_263, 0).saturating_mul(c.into()))
-			.saturating_add(T::DbWeight::get().reads(3_u64))
-			.saturating_add(T::DbWeight::get().writes(2_u64))
-	}
-	/// The range of component `c` is `[0, 8]`.
-	fn force_batch_multi_origin(c: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `3997`
-		// Minimum execution time: 3_983_000 picoseconds.
-		Weight::from_parts(4_075_000, 3997)
-			// Standard Error: 2_176
-			.saturating_add(Weight::from_parts(5_127_263, 0).saturating_mul(c.into()))
+			// Standard Error: 0
+			.saturating_add(Weight::from_parts(400, 0).saturating_mul(b.into()))
 			.saturating_add(T::DbWeight::get().reads(3_u64))
 			.saturating_add(T::DbWeight::get().writes(2_u64))
 	}
@@ -73,7 +63,8 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 // For backwards compatibility and tests.
 impl WeightInfo for () {
 	/// The range of component `c` is `[0, 8]`.
-	fn batch_multi_origin(c: u32, ) -> Weight {
+	/// The range of component `b` is `[0, 3932160]`.
+	fn batch_multi_origin(c: u32, b: u32, ) -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `3997`
@@ -81,18 +72,8 @@ impl WeightInfo for () {
 		Weight::from_parts(4_075_000, 3997)
 			// Standard Error: 2_176
 			.saturating_add(Weight::from_parts(5_127_263, 0).saturating_mul(c.into()))
-			.saturating_add(RocksDbWeight::get().reads(3_u64))
-			.saturating_add(RocksDbWeight::get().writes(2_u64))
-	}
-	/// The range of component `c` is `[0, 8]`.
-	fn force_batch_multi_origin(c: u32, ) -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `3997`
-		// Minimum execution time: 3_983_000 picoseconds.
-		Weight::from_parts(4_075_000, 3997)
-			// Standard Error: 2_176
-			.saturating_add(Weight::from_parts(5_127_263, 0).saturating_mul(c.into()))
+			// Standard Error: 0
+			.saturating_add(Weight::from_parts(400, 0).saturating_mul(b.into()))
 			.saturating_add(RocksDbWeight::get().reads(3_u64))
 			.saturating_add(RocksDbWeight::get().writes(2_u64))
 	}
