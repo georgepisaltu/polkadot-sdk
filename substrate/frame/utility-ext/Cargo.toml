@@ -19,13 +19,13 @@ codec = { workspace = true }
 frame-benchmarking = { optional = true, workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+pallet-transaction-payment = { workspace = true }
 scale-info = { features = ["derive"], workspace = true }
 sp-runtime = { workspace = true }
 
 [dev-dependencies]
 pallet-balances = { workspace = true, default-features = true }
 pallet-collective = { workspace = true, default-features = true }
-pallet-transaction-payment = { workspace = true, default-features = true }
 pallet-utility = { workspace = true, default-features = true }
 sp-io = { workspace = true, default-features = true }
 
@@ -36,6 +36,7 @@ std = [
 	"frame-benchmarking?/std",
 	"frame-support/std",
 	"frame-system/std",
+	"pallet-transaction-payment/std",
 	"scale-info/std",
 	"sp-runtime/std",
 ]

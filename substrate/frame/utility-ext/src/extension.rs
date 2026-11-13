@@ -35,10 +35,9 @@ type RuntimeCallOf<T> = <T as frame_system::Config>::RuntimeCall;
 type RuntimeOriginOf<T> = <T as frame_system::Config>::RuntimeOrigin;
 
 /// The pallet's transaction extension, wrapping the runtime's fee payment extension `S` in its
-/// slot of the pipeline. For a multi-origin batch, `S` settles the fee on a `post_info` and `len`
-/// reduced by the weight and bytes in [`RefundableShare`]. The real `post_info` is not changed,
-/// so the rest of the pipeline accounts for that weight. Other transactions go through to `S`
-/// unchanged.
+/// slot of the pipeline. For a multi-origin batch, `S` settles the fee on a `post_info` and a
+/// length reduced by the [`RefundableShare`]. The real `post_info` is not changed, so the rest of
+/// the pipeline accounts for that weight. Other transactions go through to `S` unchanged.
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, Eq, PartialEq)]
 pub struct MultiOriginBatch<T, S>(pub S, PhantomData<T>);
 
@@ -128,12 +127,12 @@ impl<T: Config + Send + Sync, S: TransactionExtension<RuntimeCallOf<T>>>
 		if !batch {
 			return S::post_dispatch_details(pre, info, post_info, len, result);
 		}
-		let (free_weight, free_len) = RefundableShare::<T>::take().unwrap_or_default();
+		let share = RefundableShare::<T>::take().unwrap_or_default();
 		let charged = PostDispatchInfo {
-			actual_weight: Some(post_info.calc_actual_weight(info).saturating_sub(free_weight)),
+			actual_weight: Some(post_info.calc_actual_weight(info).saturating_sub(share.weight)),
 			pays_fee: post_info.pays_fee,
 		};
-		let len = (len as u32).saturating_sub(free_len) as usize;
+		let len = len.saturating_sub(share.len as usize);
 		S::post_dispatch_details(pre, info, &charged, len, result)
 	}
 

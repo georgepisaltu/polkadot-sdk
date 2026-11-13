@@ -213,6 +213,7 @@ impl pallet_utility::Config for Test {
 
 impl Config for Test {
 	type InnerExtension = InnerExtension;
+	type FeeCredit = TransactionPayment;
 	#[cfg(feature = "runtime-benchmarks")]
 	type BenchmarkHelper = BenchmarkItems;
 	type MaxMultiOriginBatch = ConstU32<4>;
@@ -234,6 +235,7 @@ pub type InnerExtension = (
 	SetOrigin,
 	frame_system::AuthorizeCall<Test>,
 	frame_system::CheckNonce<Test>,
+	ChargeTransactionPayment<Test>,
 );
 
 /// Builds the benchmark items: signed by account 1.
@@ -253,6 +255,7 @@ impl BenchmarkHelper<Test> for BenchmarkItems {
 				SetOrigin::signed(1),
 				frame_system::AuthorizeCall::new(),
 				frame_system::CheckNonce::from(nonce),
+				ChargeTransactionPayment::from(0),
 			),
 			Self::setup(),
 		)
@@ -560,6 +563,7 @@ mod multi_origin {
 						spec.set_origin.clone(),
 						frame_system::AuthorizeCall::new(),
 						frame_system::CheckNonce::from(spec.nonce),
+						ChargeTransactionPayment::from(0),
 					),
 					spec.expected.clone(),
 				)
@@ -699,6 +703,23 @@ mod multi_origin {
 			.unwrap_or_default()
 	}
 
+	/// What `who` paid for all their transactions and items.
+	fn fees_paid_by(who: u64) -> u64 {
+		System::events()
+			.into_iter()
+			.filter_map(|record| match record.event {
+				RuntimeEvent::TransactionPayment(
+					pallet_transaction_payment::Event::TransactionFeePaid {
+						who: payer,
+						actual_fee,
+						..
+					},
+				) if payer == who => Some(actual_fee),
+				_ => None,
+			})
+			.sum()
+	}
+
 	/// The batch overhead of `uxt`, for its number of items and their bytes.
 	fn overhead(uxt: &UncheckedExtrinsic) -> Weight {
 		let items = items_of(&uxt.function);
@@ -713,10 +734,17 @@ mod multi_origin {
 		})
 	}
 
-	/// The encoded length of the items at `indices` of the batch `uxt`.
+	/// The bytes of the items at `indices` of the batch `uxt`.
 	fn items_len(uxt: &UncheckedExtrinsic, indices: &[usize]) -> usize {
 		let items = items_of(&uxt.function);
 		indices.iter().map(|index| items[*index].encoded_size()).sum()
+	}
+
+	/// What the submitter of the batch `uxt` pays when every item pays for itself: the overhead,
+	/// the outer pipeline and the bytes which are not the items'.
+	fn submitter_fee(uxt: &UncheckedExtrinsic) -> u64 {
+		let all = (0..items_of(&uxt.function).len()).collect::<Vec<_>>();
+		fee(overhead(uxt) + outer_weight(uxt), uxt.encoded_size() - items_len(uxt, &all))
 	}
 
 	/// The outer pipeline's weight, which the pipeline adds to the batch's actual weight.
@@ -768,15 +796,19 @@ mod multi_origin {
 				spec(call_transfer(4, 200), SetOrigin::signed(2)),
 				spec(RuntimeCall::Example(ExampleCall::council_only {}), SetOrigin::council()),
 			];
-			apply_ok(batch_tx(3, BatchMode::StopAtFailure, &specs));
+			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
+			let submitter = submitter_fee(&uxt);
+			apply_ok(uxt);
 
-			let paid = fee_paid_by(3);
-			assert!(paid > 0);
 			assert_eq!(balance(4), INITIAL_BALANCE + 300);
-			// The items pay nothing, the submitter pays for the batch.
-			assert_eq!(balance(1), INITIAL_BALANCE - 100);
-			assert_eq!(balance(2), INITIAL_BALANCE - 200);
-			assert_eq!(balance(3), INITIAL_BALANCE - paid);
+			// The signed items pay for themselves, the council one pays nothing, the submitter
+			// pays for the rest.
+			assert!(fee_paid_by(1) > 0);
+			assert_eq!(balance(1), INITIAL_BALANCE - 100 - fee_paid_by(1));
+			assert_eq!(balance(2), INITIAL_BALANCE - 200 - fee_paid_by(2));
+			assert!(submitter > 0);
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_eq!(balance(3), INITIAL_BALANCE - submitter);
 			assert_eq!(example::CouncilCalls::<Test>::get(), 1);
 			assert_eq!(System::account_nonce(1), 1);
 			assert_eq!(System::account_nonce(2), 1);
@@ -840,7 +872,7 @@ mod multi_origin {
 			apply_ok(batch_tx(1, BatchMode::StopAtFailure, &specs));
 
 			assert_eq!(balance(4), INITIAL_BALANCE + 300);
-			assert_eq!(balance(1), INITIAL_BALANCE - 200 - fee_paid_by(1));
+			assert_eq!(balance(1), INITIAL_BALANCE - 200 - fees_paid_by(1));
 			assert_eq!(System::account_nonce(1), 3);
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
 			assert_fee_credit_empty();
@@ -848,7 +880,7 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn submitter_pays_for_the_whole_batch() {
+	fn items_pay_for_themselves_and_the_submitter_for_the_rest() {
 		new_test_ext().execute_with(|| {
 			let specs = [
 				spec(call_foobar(false, 1_000, None), SetOrigin::signed(1)),
@@ -859,23 +891,26 @@ mod multi_origin {
 			let len = uxt.encoded_size();
 			let full_fee = full_fee(&uxt);
 			let overhead = overhead(&uxt);
-			let pipelines = pipelines_weight(&uxt, &[0, 1]);
+			let (item_0, item_1) = (pipelines_weight(&uxt, &[0]), pipelines_weight(&uxt, &[1]));
 			let outer = outer_weight(&uxt);
 			// The declared weight is the batch overhead, the item pipelines and the calls.
-			assert_eq!(info.call_weight, overhead + pipelines + w(3_000));
+			assert_eq!(info.call_weight, overhead + item_0 + item_1 + w(3_000));
 
-			let post_info = apply_ok(uxt);
+			let post_info = apply_ok(uxt.clone());
 
 			// The unused call weight is refunded, the outer pipeline is paid for.
-			let actual = overhead + pipelines + w(1_500) + outer;
+			let actual = overhead + item_0 + item_1 + w(1_500) + outer;
 			assert_eq!(post_info.actual_weight, Some(actual));
+			// Each item pays for its pipeline, its actual call weight and its bytes, the
+			// submitter for the overhead, the outer pipeline and the rest of the bytes.
+			assert_eq!(fee_paid_by(1), fee(item_0 + w(1_000), items_len(&uxt, &[0])));
+			assert_eq!(fee_paid_by(2), fee(item_1 + w(500), items_len(&uxt, &[1])));
+			assert_eq!(balance(1), INITIAL_BALANCE - fee_paid_by(1));
+			assert_eq!(balance(2), INITIAL_BALANCE - fee_paid_by(2));
 			let paid = fee_paid_by(3);
-			assert_eq!(paid, fee(actual, len));
+			assert_eq!(paid, fee(overhead + outer, len - items_len(&uxt, &[0, 1])));
 			assert!(paid < full_fee);
 			assert_eq!(balance(3), INITIAL_BALANCE - paid);
-			// The items pay nothing.
-			assert_eq!(balance(1), INITIAL_BALANCE);
-			assert_eq!(balance(2), INITIAL_BALANCE);
 			assert_fee_credit_empty();
 		});
 	}
@@ -890,10 +925,14 @@ mod multi_origin {
 			assert!(pipelines.all_gte(SET_ORIGIN_WEIGHT));
 			let expected =
 				overhead(&uxt) + pipelines - SET_ORIGIN_WEIGHT + w(1_000) + outer_weight(&uxt);
+			let submitter = submitter_fee(&uxt);
+			let item_len = items_len(&uxt, &[0]);
 
 			let post_info = apply_ok(uxt);
 
 			assert_eq!(post_info.actual_weight, Some(expected));
+			assert_eq!(fee_paid_by(1), fee(pipelines - SET_ORIGIN_WEIGHT + w(1_000), item_len));
+			assert_eq!(fee_paid_by(3), submitter);
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
 		});
 	}
@@ -909,24 +948,31 @@ mod multi_origin {
 			];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
 			// The weight of the item which did not run is refunded, the invalid item's pipeline
-			// is paid for.
+			// and the bytes of both are paid for by the submitter.
 			let expected = overhead(&uxt) +
 				pipelines_weight(&uxt, &[0, 1]) +
 				specs[0].call.get_dispatch_info().call_weight +
 				outer_weight(&uxt);
+			let submitter = fee(
+				expected -
+					pipelines_weight(&uxt, &[0]) -
+					specs[0].call.get_dispatch_info().call_weight,
+				uxt.encoded_size() - items_len(&uxt, &[0]),
+			);
 
 			let post_info = apply_ok(uxt);
 
 			// Only the first item applied.
 			assert_eq!(balance(4), INITIAL_BALANCE + 100);
-			assert_eq!(balance(1), INITIAL_BALANCE - 100);
+			assert_eq!(balance(1), INITIAL_BALANCE - 100 - fee_paid_by(1));
 			assert_eq!(System::account_nonce(1), 1);
 			// The invalid item left no trace.
 			assert_eq!(balance(2), INITIAL_BALANCE);
 			assert_eq!(System::account_nonce(2), 0);
 			assert_eq!(SetOrigin::prepared(), 1);
 			assert_eq!(SetOrigin::post_dispatched(), 1);
-			assert_eq!(balance(3), INITIAL_BALANCE - fee_paid_by(3));
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_eq!(balance(3), INITIAL_BALANCE - submitter);
 			assert_eq!(
 				pallet_events(),
 				vec![
@@ -956,19 +1002,29 @@ mod multi_origin {
 				pipelines_weight(&uxt, &[0, 1]) +
 				specs[0].call.get_dispatch_info().call_weight +
 				w(300) + outer_weight(&uxt);
+			let item_1 = pipelines_weight(&uxt, &[1]);
+			// The item the batch stopped before is on the submitter.
+			let submitter = fee(
+				overhead(&uxt) + outer_weight(&uxt),
+				uxt.encoded_size() - items_len(&uxt, &[0, 1]),
+			);
+			let item_1_len = items_len(&uxt, &[1]);
 
 			let post_info = apply_ok(uxt);
 
 			assert_eq!(balance(4), INITIAL_BALANCE + 100);
 			assert_eq!(System::account_nonce(1), 1);
-			// The failed item's pipeline applied: nonce bumped.
-			assert_eq!(balance(2), INITIAL_BALANCE);
+			// The failed item's pipeline applied: nonce bumped, fee paid like for a failed
+			// transaction.
+			assert_eq!(fee_paid_by(2), fee(item_1 + w(300), item_1_len));
+			assert_eq!(balance(2), INITIAL_BALANCE - fee_paid_by(2));
 			assert_eq!(System::account_nonce(2), 1);
 			assert_eq!(SetOrigin::prepared(), 2);
 			assert_eq!(SetOrigin::post_dispatched(), 2);
 			// The call's effects were reverted.
 			assert_eq!(example::Calls::<Test>::get(), 0);
-			assert_eq!(balance(3), INITIAL_BALANCE - fee_paid_by(3));
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_eq!(balance(3), INITIAL_BALANCE - submitter);
 			assert_eq!(
 				pallet_events(),
 				vec![
@@ -996,14 +1052,22 @@ mod multi_origin {
 				specs[0].call.get_dispatch_info().call_weight +
 				w(1_000) + specs[3].call.get_dispatch_info().call_weight +
 				outer_weight(&uxt);
+			// The invalid item's pipeline and bytes are on the submitter.
+			let submitter = fee(
+				overhead(&uxt) + pipelines_weight(&uxt, &[1]) + outer_weight(&uxt),
+				uxt.encoded_size() - items_len(&uxt, &[0, 2, 3]),
+			);
 
 			let post_info = apply_ok(uxt);
 
 			assert_eq!(balance(4), INITIAL_BALANCE + 200);
 			assert_eq!(System::account_nonce(1), 2);
-			assert_eq!(balance(2), INITIAL_BALANCE);
+			// The failed item is on its signer.
+			assert!(fee_paid_by(2) > 0);
+			assert_eq!(balance(2), INITIAL_BALANCE - fee_paid_by(2));
 			assert_eq!(System::account_nonce(2), 1);
-			assert_eq!(balance(3), INITIAL_BALANCE - fee_paid_by(3));
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_eq!(balance(3), INITIAL_BALANCE - submitter);
 			assert_eq!(
 				pallet_events(),
 				vec![
@@ -1327,6 +1391,8 @@ mod multi_origin {
 	#[test]
 	fn batch_is_charged_like_any_transaction() {
 		new_test_ext().execute_with(|| {
+			// The item is rejected after its call ran: nothing is refunded.
+			SetOrigin::fail_post_dispatch();
 			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(1))];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
 			let info = uxt.get_dispatch_info();
@@ -1367,9 +1433,11 @@ mod multi_origin {
 				pipelines_weight(&uxt, &[0]) +
 				specs[0].call.get_dispatch_info().call_weight +
 				outer_weight(&uxt);
+			let submitter = fee(expected, uxt.encoded_size());
 
 			let post_info = apply_ok(uxt);
 
+			// The item's settlement was rolled back with it.
 			assert_eq!(balance(4), INITIAL_BALANCE);
 			assert_eq!(balance(1), INITIAL_BALANCE);
 			assert_eq!(System::account_nonce(1), 0);
@@ -1382,7 +1450,8 @@ mod multi_origin {
 				}]
 			);
 			assert_eq!(post_info.actual_weight, Some(expected));
-			assert_eq!(balance(3), INITIAL_BALANCE - fee_paid_by(3));
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_eq!(balance(3), INITIAL_BALANCE - submitter);
 			assert_fee_credit_empty();
 		});
 	}
@@ -1398,7 +1467,8 @@ mod multi_origin {
 			];
 			let uxt = batch_tx(5, BatchMode::All, &specs);
 			let len = uxt.encoded_size();
-			// Every call is charged at its declared weight, the free one included.
+			// Every call is charged to the submitter at its declared weight, the free one
+			// included.
 			let expected = overhead(&uxt) +
 				pipelines_weight(&uxt, &[0, 1, 2]) +
 				w(1_000) + specs[1].call.get_dispatch_info().call_weight +
@@ -1418,9 +1488,13 @@ mod multi_origin {
 					Event::BatchCompletedWithErrors,
 				]
 			);
-			// The calls ran and were rolled back with their items, events included.
+			// The calls ran and were rolled back with their items, events and settlements
+			// included.
 			assert_eq!(example::Calls::<Test>::get(), 0);
 			assert_eq!(balance(4), INITIAL_BALANCE);
+			assert_eq!(balance(1), INITIAL_BALANCE);
+			assert_eq!(balance(2), INITIAL_BALANCE);
+			assert_eq!(balance(3), INITIAL_BALANCE);
 			assert!(!System::events().iter().any(|record| matches!(
 				record.event,
 				RuntimeEvent::Balances(pallet_balances::Event::Transfer { .. })
@@ -1502,7 +1576,7 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn free_items_are_refunded_to_the_submitter() {
+	fn free_items_cost_nobody() {
 		new_test_ext().execute_with(|| {
 			// Two free items, one of which fails, and a paying one.
 			let specs = [
@@ -1512,13 +1586,12 @@ mod multi_origin {
 			];
 			let uxt = batch_tx(3, BatchMode::All, &specs);
 			let info = uxt.get_dispatch_info();
-			let len = uxt.encoded_size();
 			let full_fee = full_fee(&uxt);
 			assert_eq!(info.pays_fee, Pays::Yes);
-			// The block accounts for the free items, the submitter does not pay for them, their
-			// bytes included.
-			let free_weight = pipelines_weight(&uxt, &[0, 1]) + w(20);
-			let free_len = items_len(&uxt, &[0, 1]);
+			// The block accounts for the free items, nobody pays for them.
+			let submitter = submitter_fee(&uxt);
+			let item_2 = pipelines_weight(&uxt, &[2]);
+			let item_2_len = items_len(&uxt, &[2]);
 			let expected =
 				overhead(&uxt) + pipelines_weight(&uxt, &[0, 1, 2]) + w(1_020) + outer_weight(&uxt);
 
@@ -1526,9 +1599,10 @@ mod multi_origin {
 
 			assert_eq!(post_info.actual_weight, Some(expected));
 			let paid = fee_paid_by(3);
-			assert_eq!(paid, fee(expected - free_weight, len - free_len));
+			assert_eq!(paid, submitter);
 			assert!(paid < full_fee);
-			assert_eq!(balance(1), INITIAL_BALANCE);
+			assert_eq!(fee_paid_by(2), 0);
+			assert_eq!(balance(1), INITIAL_BALANCE - fee(item_2 + w(1_000), item_2_len));
 			assert_eq!(balance(2), INITIAL_BALANCE);
 			assert_eq!(System::account_nonce(1), 2);
 			assert_eq!(System::account_nonce(2), 1);
@@ -1539,7 +1613,7 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn free_items_are_refunded_when_the_batch_stops() {
+	fn items_are_refunded_when_the_batch_stops() {
 		new_test_ext().execute_with(|| {
 			// A free item, then an invalid one which stops the batch.
 			let specs = [
@@ -1549,15 +1623,17 @@ mod multi_origin {
 			];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
 			let len = uxt.encoded_size();
-			let free_weight = pipelines_weight(&uxt, &[0]) + w(10);
-			let free_len = items_len(&uxt, &[0]);
 			let expected =
 				overhead(&uxt) + pipelines_weight(&uxt, &[0, 1]) + w(10) + outer_weight(&uxt);
+			// The free item is refunded, the invalid item's pipeline and the bytes of the other
+			// two are not.
+			let submitter =
+				fee(expected - pipelines_weight(&uxt, &[0]) - w(10), len - items_len(&uxt, &[0]));
 
 			let post_info = apply_ok(uxt);
 
 			assert_eq!(post_info.actual_weight, Some(expected));
-			assert_eq!(fee_paid_by(3), fee(expected - free_weight, len - free_len));
+			assert_eq!(fee_paid_by(3), submitter);
 			assert_eq!(
 				pallet_events().last(),
 				Some(&Event::BatchInterrupted {
@@ -1573,7 +1649,7 @@ mod multi_origin {
 	fn stale_refundable_share_is_ignored() {
 		new_test_ext().execute_with(|| {
 			// Left behind by a batch dispatched outside a batch transaction.
-			RefundableShare::<Test>::put((Weight::MAX, u32::MAX));
+			RefundableShare::<Test>::put(Share { weight: Weight::MAX, len: u32::MAX });
 			// Other transactions do not look at it.
 			let uxt = signed_tx(1, call_transfer(4, 100));
 			let transfer_fee = full_fee(&uxt);
@@ -1583,23 +1659,26 @@ mod multi_origin {
 			// A batch transaction clears it before running.
 			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let batch_fee = full_fee(&uxt);
+			let batch_fee = submitter_fee(&uxt);
 			apply_ok(uxt);
+			assert!(batch_fee > 0);
 			assert_eq!(fee_paid_by(3), batch_fee);
 			assert_fee_credit_empty();
 		});
 	}
 
 	#[test]
-	fn without_the_batch_extension_free_items_are_paid_for() {
+	fn without_the_batch_extension_the_submitter_pays_in_full() {
 		new_test_ext().execute_with(|| {
-			let specs = [spec(call_free(false), SetOrigin::signed(1))];
+			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(1))];
 			let call = batch_call(
 				BatchMode::StopAtFailure,
 				0,
 				build_items(3, 0, BatchMode::StopAtFailure, &specs),
 			);
 			let (post_info, len, paid) = apply_plain(3, call);
+			// The item paid for itself and the submitter for it again.
+			assert!(fee_paid_by(1) > 0);
 			assert_eq!(paid, fee(post_info.actual_weight.unwrap(), len));
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
 			assert!(RefundableShare::<Test>::get().is_some());
@@ -1609,7 +1688,7 @@ mod multi_origin {
 	#[test]
 	fn stale_refundable_share_is_cleared_even_when_the_batch_fails() {
 		new_test_ext().execute_with(|| {
-			RefundableShare::<Test>::put((Weight::MAX, u32::MAX));
+			RefundableShare::<Test>::put(Share { weight: Weight::MAX, len: u32::MAX });
 			let specs = [spec(call_free(false), SetOrigin::signed(1))];
 			let items = build_items(3, 0, BatchMode::StopAtFailure, &specs);
 			// The wrong nonce: the call fails before writing the share.
@@ -1635,7 +1714,7 @@ mod multi_origin {
 					3,
 					0,
 					BatchMode::StopAtFailure,
-					&[spec(call_free(false), SetOrigin::signed(1))],
+					&[spec(call_foobar(false, 1_000, None), SetOrigin::signed(1))],
 				),
 			);
 			let uxt =
@@ -1644,36 +1723,45 @@ mod multi_origin {
 
 			let post_info = apply(uxt).unwrap().unwrap();
 
-			// The nonce check passes: the outer `CheckNonce` bumped 3's nonce. The free item is
-			// not refunded: the transaction's call is not a batch.
+			// The nonce check passes: the outer `CheckNonce` bumped 3's nonce. The item paid for
+			// itself without touching the submitter's fee, which is not refunded: the
+			// transaction's call is not a batch.
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
 			assert_eq!(System::account_nonce(1), 1);
+			assert!(fee_paid_by(1) > 0);
+			assert_eq!(balance(1), INITIAL_BALANCE - fee_paid_by(1));
 			assert_eq!(fee_paid_by(3), fee(post_info.actual_weight.unwrap(), len));
+			assert_eq!(balance(3), INITIAL_BALANCE - fee_paid_by(3));
 			assert!(RefundableShare::<Test>::get().is_some());
 			// The next batch transaction clears it.
 			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let batch_fee = full_fee(&uxt);
+			let batch_fee = submitter_fee(&uxt);
 			apply_ok(uxt);
+			assert!(batch_fee > 0);
 			assert_eq!(fee_paid_by(3), batch_fee);
 			assert_fee_credit_empty();
 		});
 	}
 
 	#[test]
-	fn each_batch_refunds_its_own_free_items() {
+	fn each_batch_refunds_its_own_items() {
 		new_test_ext().execute_with(|| {
-			let specs = [spec(call_free(false), SetOrigin::signed(1))];
+			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(1))];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let free_fee = full_fee(&uxt);
+			let submitter = submitter_fee(&uxt);
 			apply_ok(uxt);
-			assert!(fee_paid_by(3) < free_fee);
+			assert_eq!(fee_paid_by(3), submitter);
 
-			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
+			// An invalid item: nothing of this batch is refunded.
+			let specs = [with_nonce(spec(call_transfer(4, 100), SetOrigin::signed(2)), 5)];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let paying_fee = full_fee(&uxt);
+			let submitter = fee(
+				overhead(&uxt) + pipelines_weight(&uxt, &[0]) + outer_weight(&uxt),
+				uxt.encoded_size(),
+			);
 			apply_ok(uxt);
-			assert_eq!(fee_paid_by(3), paying_fee);
+			assert_eq!(fee_paid_by(3), submitter);
 			assert_fee_credit_empty();
 		});
 	}
@@ -1720,10 +1808,18 @@ mod multi_origin {
 	fn authorization_is_checked_against_earlier_items() {
 		new_test_ext().execute_with(|| {
 			let specs = [authorized(call_claim()), authorized(call_claim())];
-			apply_ok(batch_tx(3, BatchMode::StopAtFailure, &specs));
+			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
+			// The applied item is refunded though its origin paid nothing, like a general
+			// transaction; the rejected one is on the submitter.
+			let submitter = fee(
+				overhead(&uxt) + pipelines_weight(&uxt, &[1]) + outer_weight(&uxt),
+				uxt.encoded_size() - items_len(&uxt, &[0]),
+			);
+			apply_ok(uxt);
 
 			// The first claim applied, the second was authorized against the state it left.
 			assert_eq!(example::Claims::<Test>::get(), 1);
+			assert_eq!(fee_paid_by(3), submitter);
 			assert_eq!(
 				pallet_events(),
 				vec![
@@ -1731,6 +1827,35 @@ mod multi_origin {
 					Event::BatchInterrupted { index: 1, error: invalid(InvalidTransaction::Stale) },
 				]
 			);
+		});
+	}
+
+	#[test]
+	fn item_whose_signer_cannot_pay_is_invalid() {
+		new_test_ext().execute_with(|| {
+			assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), 1, 1));
+			let specs = [
+				spec(call_foobar(false, 1_000, None), SetOrigin::signed(1)),
+				spec(call_foobar(false, 1_000, None), SetOrigin::signed(2)),
+			];
+			let uxt = batch_tx(3, BatchMode::All, &specs);
+			let submitter = fee(
+				overhead(&uxt) + pipelines_weight(&uxt, &[0]) + outer_weight(&uxt),
+				uxt.encoded_size() - items_len(&uxt, &[1]),
+			);
+			apply_ok(uxt);
+			assert_eq!(
+				pallet_events(),
+				vec![
+					Event::ItemFailed { index: 0, error: invalid(InvalidTransaction::Payment) },
+					Event::ItemCompleted { index: 1 },
+					Event::BatchCompletedWithErrors,
+				]
+			);
+			assert_eq!(balance(1), 1);
+			assert_eq!(System::account_nonce(1), 0);
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_fee_credit_empty();
 		});
 	}
 

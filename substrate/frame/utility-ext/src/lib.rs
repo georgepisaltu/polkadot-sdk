@@ -40,13 +40,17 @@
 //! before it, `force_batch_multi_origin` applies every item regardless. The outcome is reported
 //! in events.
 //!
-//! The submitter pays for the whole batch like for any transaction: the overhead, the items'
-//! pipelines and calls and the transaction's length, through the runtime's fee payment extension,
-//! which the pallet's [`MultiOriginBatch`] extension wraps so that it refunds the share of the
-//! items whose dispatch returned `Pays::No`, their weight and their bytes, as such calls cost
-//! nobody anything as transactions of their own. Only `Pays::No` counts: a call feeless through
-//! `pallet_skip_feeless_payment` is paid for as an item. Items pay nothing and their pipelines must
-//! not charge fees.
+//! The submitter pays for the whole batch up front like for any transaction: the overhead, the
+//! items' pipelines and calls and the transaction's length, through the runtime's fee payment
+//! extension. Each item then pays for itself through its pipeline like a transaction of its own,
+//! for its weight and its bytes: a signed item is charged by its fee payment extension, an item
+//! with another origin is charged, or not, however the runtime charges such transactions. The
+//! pallet's [`MultiOriginBatch`] extension wraps the fee payment extension so that it refunds the
+//! submitter the weight and bytes of every item whose pipeline ran to completion, whether its
+//! call succeeded or failed. The submitter keeps paying for the items their pipeline rejected,
+//! before or after their call ran, and for the items the batch stopped before. While the items
+//! run, the submitter's withdrawn fee is set aside ([`Config::FeeCredit`]) so that the items' fee
+//! payment extensions settle with their own.
 //!
 //! Items are signed over the [`ItemImplication`] of their batch, which binds them to the
 //! submitter, the submitter's nonce, the batch mode, their position and the other items, so an
@@ -74,12 +78,13 @@ use alloc::vec::Vec;
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use frame_support::{
 	dispatch::{
-		DispatchClass, DispatchInfo, GetDispatchInfo, Pays, PostDispatchInfo, WithPostDispatchInfo,
+		DispatchClass, DispatchInfo, GetDispatchInfo, PostDispatchInfo, WithPostDispatchInfo,
 	},
 	storage::{transactional::with_transaction_opaque_err, TransactionOutcome},
-	traits::{Contains, IsSubType, OriginTrait},
+	traits::{Contains, Imbalance, IsSubType, OriginTrait, SuppressedDrop},
 	BoundedVec,
 };
+use pallet_transaction_payment::{OnChargeTransaction, TxCreditHold};
 use scale_info::TypeInfo;
 use sp_runtime::{
 	traits::{
@@ -128,6 +133,13 @@ pub enum ItemError {
 	Invalid(TransactionValidityError),
 	/// The item's call failed.
 	Failed(DispatchError),
+}
+
+/// The weight and bytes of the items of a batch which paid for themselves.
+#[derive(Encode, Decode, Clone, Copy, PartialEq, Eq, Debug, Default, TypeInfo, MaxEncodedLen)]
+pub struct Share {
+	pub weight: Weight,
+	pub len: u32,
 }
 
 /// Why an item could not be applied.
@@ -202,11 +214,50 @@ impl<'a, AccountId: Encode, Nonce: Encode, Hash: Encode> Encode
 	}
 }
 
+/// The transient credit in which the fee payment extension keeps the transaction's withdrawn fee,
+/// set aside while the items of a batch run so that their fee payment extensions settle with their
+/// own.
+pub trait FeeCredit {
+	type Credit;
+	/// Take the credit of the transaction, if any.
+	fn take() -> Option<Self::Credit>;
+	/// Put it back.
+	fn restore(credit: Self::Credit);
+}
+
+/// For fee payment extensions keeping no such credit.
+impl FeeCredit for () {
+	type Credit = ();
+	fn take() -> Option<()> {
+		None
+	}
+	fn restore(_: ()) {}
+}
+
+type TxCreditOf<T> =
+	<<<T as pallet_transaction_payment::Config>::OnChargeTransaction as TxCreditHold<T>>::Credit as SuppressedDrop>::Inner;
+type TxBalanceOf<T> =
+	<<T as pallet_transaction_payment::Config>::OnChargeTransaction as OnChargeTransaction<T>>::Balance;
+
+impl<T: pallet_transaction_payment::Config> FeeCredit for pallet_transaction_payment::Pallet<T>
+where
+	TxCreditOf<T>: Imbalance<TxBalanceOf<T>>,
+{
+	type Credit = TxCreditOf<T>;
+	fn take() -> Option<Self::Credit> {
+		Self::withdraw_txfee(Self::remaining_txfee::<TxBalanceOf<T>>())
+	}
+	fn restore(credit: Self::Credit) {
+		Self::deposit_txfee(credit)
+	}
+}
+
 /// Builds the items the benchmarks dispatch, see the [`benchmarking`] module docs.
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<T: Config> {
-	/// Set up an origin whose item pipeline accepts up to `MaxMultiOriginBatch`
-	/// `frame_system::remark` items of any length with the nonces 0, 1, ..., and return it.
+	/// Set up an origin whose item pipeline accepts, and which can pay for, up to
+	/// `MaxMultiOriginBatch` `frame_system::remark` items of any length with the nonces 0, 1,
+	/// ..., and return it.
 	fn setup() -> PalletsOriginOf<T>;
 
 	/// An item of that origin dispatching `call` with `nonce`, authorized over `implication`, the
@@ -240,22 +291,25 @@ pub mod pallet {
 	{
 		/// The transaction extension pipeline carried by every item of a multi-origin batch.
 		///
-		/// A subset of the runtime's pipeline without the extensions acting on the transaction as a
-		/// whole (`CheckWeight`, `WeightReclaim`) and without the fee payment extension, whose
-		/// `post_dispatch` would take the transient credit of `pallet_transaction_payment`, where
-		/// the submitter's fee waits, and refund it to the item's signer. As the
-		/// [`ItemImplication`] binds items to their batch but not to the chain, it is recommended
-		/// to include `CheckGenesis`, `CheckSpecVersion`, `CheckTxVersion` and `CheckEra`. The
-		/// extension verifying signatures should come first, so that the data of every other
-		/// extension is in the implication it signs.
+		/// The runtime's pipeline without the extensions acting on the transaction as a whole
+		/// (`CheckWeight`, `WeightReclaim`), the fee payment extension included: it charges the
+		/// item's origin for the item's weight and bytes. As the [`ItemImplication`] binds items to
+		/// their batch but not to the chain, it is recommended to include `CheckGenesis`,
+		/// `CheckSpecVersion`, `CheckTxVersion` and `CheckEra`. The extension verifying signatures
+		/// should come first, so that the data of every other extension is in the implication it
+		/// signs.
 		///
-		/// Items are validated with [`TransactionSource::External`]. The validity their pipeline
-		/// returns is dropped: `provides` tags do not deduplicate items, so authorized calls must
-		/// check their state in `authorize`.
+		/// Items are validated with [`TransactionSource::External`] and their encoded length. The
+		/// validity their pipeline returns is dropped: `provides` tags do not deduplicate items,
+		/// so authorized calls must check their state in `authorize`.
 		///
 		/// The inner extension is part of the pallet's metadata, which, with the
 		/// [`ItemImplication`] encoding, is what wallets need to build items.
 		type InnerExtension: TransactionExtension<RuntimeCallOf<Self>> + TypeInfo;
+
+		/// Sets the transaction's fee aside while the items run, see [`FeeCredit`]:
+		/// `pallet_transaction_payment::Pallet` for its fee payment extensions.
+		type FeeCredit: FeeCredit;
 
 		/// Builds the items the benchmarks dispatch.
 		#[cfg(feature = "runtime-benchmarks")]
@@ -269,21 +323,19 @@ pub mod pallet {
 		///
 		/// Calls dispatched with a fresh origin, e.g. by `pallet_proxy::proxy` or
 		/// `pallet_sudo::sudo_as`, escape the filter put on the item's origin for nested calls.
-		/// Calls relying on the transient fee credit of `pallet_transaction_payment` belonging to
-		/// the transaction's signer must be kept out.
 		type MultiOriginCallFilter: Contains<RuntimeCallOf<Self>>;
 
 		/// Weight information for extrinsics in this pallet.
 		type WeightInfo: WeightInfo;
 	}
 
-	/// The weight and encoded length of the items of the last batch whose dispatch returned
-	/// `Pays::No`, consumed by [`MultiOriginBatch`] in `post_dispatch` when the batch is the
-	/// transaction's call. A batch dispatched any other way leaves it behind until the next batch
-	/// transaction clears it in `prepare`. Whitelisted, so its operations are not benchmarked.
+	/// The [`Share`] of the last batch, consumed by [`MultiOriginBatch`] in `post_dispatch` when
+	/// the batch is the transaction's call. A batch dispatched any other way leaves it behind
+	/// until the next batch transaction clears it in `prepare`. Whitelisted, so its operations
+	/// are not benchmarked.
 	#[pallet::storage]
 	#[pallet::whitelist_storage]
-	pub type RefundableShare<T: Config> = StorageValue<_, (Weight, u32), OptionQuery>;
+	pub type RefundableShare<T: Config> = StorageValue<_, Share, OptionQuery>;
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -382,9 +434,9 @@ pub mod pallet {
 			}
 			let items_hash = Self::items_hash(items.iter().map(|item| (&item.call, &item.origin)));
 
+			let submitter_fee = <T as Config>::FeeCredit::take();
 			let mut weight = Weight::zero();
-			let mut free_weight = Weight::zero();
-			let mut free_len = 0u32;
+			let mut refundable = Share::default();
 			let mut has_error = false;
 			for (index, item) in items.into_iter().enumerate() {
 				let index = index as u32;
@@ -395,12 +447,12 @@ pub mod pallet {
 					index,
 					items_hash: &items_hash,
 				};
-				let len = item.encoded_size() as u32;
-				let (item_weight, pays, outcome) = Self::apply_item(item, &implication);
+				let len = item.encoded_size();
+				let (item_weight, outcome) = Self::apply_item(item, len, &implication);
 				weight = weight.saturating_add(item_weight);
-				if pays == Pays::No {
-					free_weight = free_weight.saturating_add(item_weight);
-					free_len = free_len.saturating_add(len);
+				if !matches!(outcome, Err(ItemError::Invalid(_))) {
+					refundable.weight = refundable.weight.saturating_add(item_weight);
+					refundable.len = refundable.len.saturating_add(len as u32);
 				}
 				let Err(error) = outcome else {
 					Self::deposit_event(Event::ItemCompleted { index });
@@ -415,54 +467,60 @@ pub mod pallet {
 					BatchMode::All => Self::deposit_event(Event::ItemFailed { index, error }),
 				}
 			}
+			if let Some(credit) = submitter_fee {
+				<T as Config>::FeeCredit::restore(credit);
+			}
 			if !has_error {
 				Self::deposit_event(Event::BatchCompleted);
 			} else if mode == BatchMode::All {
 				Self::deposit_event(Event::BatchCompletedWithErrors);
 			}
-			if free_len != 0 {
-				RefundableShare::<T>::put((free_weight, free_len));
+			if refundable != Share::default() {
+				RefundableShare::<T>::put(refundable);
 			}
 			Ok(Some(overhead.saturating_add(weight)).into())
 		}
 
-		/// Apply an item in a storage transaction rolled back if the item is invalid. Returns the
-		/// weight the item used, whether its dispatch pays a fee and its outcome.
+		/// Apply an item of `len` bytes in a storage transaction rolled back if the item is
+		/// invalid. Returns the weight the item used and its outcome.
 		fn apply_item(
 			item: MultiOriginItemOf<T>,
+			len: usize,
 			implication: &ItemImplication<AccountIdOf<T>, NonceOf<T>, HashOf<T>>,
-		) -> (Weight, Pays, Result<(), ItemError>) {
+		) -> (Weight, Result<(), ItemError>) {
 			let mut info = item.call.get_dispatch_info();
 			info.extension_weight = item.extension.weight(&item.call);
 
-			let result =
-				with_transaction_opaque_err(|| match Self::run_item(item, implication, &info) {
+			let result = with_transaction_opaque_err(|| {
+				match Self::run_item(item, len, implication, &info) {
 					Err(err) => TransactionOutcome::Rollback(Err(err)),
 					Ok(res) => TransactionOutcome::Commit(Ok(res)),
-				})
-				.unwrap_or_else(|()| {
-					Err(RunError::BeforeDispatch(InvalidTransaction::ExhaustsResources.into()))
-				});
+				}
+			})
+			.unwrap_or_else(|()| {
+				Err(RunError::BeforeDispatch(InvalidTransaction::ExhaustsResources.into()))
+			});
 
 			match result {
 				Err(RunError::BeforeDispatch(err)) => {
-					(info.extension_weight, Pays::Yes, Err(ItemError::Invalid(err)))
+					(info.extension_weight, Err(ItemError::Invalid(err)))
 				},
 				// The call ran before the rollback: its declared weight is used and paid for.
 				Err(RunError::AfterDispatch(err)) => {
-					(info.total_weight(), Pays::Yes, Err(ItemError::Invalid(err)))
+					(info.total_weight(), Err(ItemError::Invalid(err)))
 				},
-				Ok((weight, pays, result)) => (weight, pays, result.map_err(ItemError::Failed)),
+				Ok((weight, result)) => (weight, result.map_err(ItemError::Failed)),
 			}
 		}
 
 		/// Run an item through its pipeline and dispatch its call. Returns the actual weight of
-		/// the item, whether it pays a fee and its result.
+		/// the item and its result.
 		fn run_item(
 			item: MultiOriginItemOf<T>,
+			len: usize,
 			implication: &ItemImplication<AccountIdOf<T>, NonceOf<T>, HashOf<T>>,
 			info: &DispatchInfo,
-		) -> Result<(Weight, Pays, Result<(), DispatchError>), RunError> {
+		) -> Result<(Weight, Result<(), DispatchError>), RunError> {
 			let MultiOriginItem { call, extension, origin: expected } = item;
 			if !Self::item_call_allowed(&call) {
 				return Err(RunError::BeforeDispatch(InvalidTransaction::Call.into()));
@@ -473,7 +531,7 @@ pub mod pallet {
 					frame_system::RawOrigin::None.into(),
 					&call,
 					info,
-					0,
+					len,
 					extension.implicit().map_err(RunError::BeforeDispatch)?,
 					&implication,
 					TransactionSource::External,
@@ -486,7 +544,7 @@ pub mod pallet {
 				return Err(RunError::BeforeDispatch(InvalidTransaction::BadSigner.into()));
 			}
 			let pre = extension
-				.prepare(val, &origin, &call, info, 0)
+				.prepare(val, &origin, &call, info, len)
 				.map_err(RunError::BeforeDispatch)?;
 
 			let mut origin: RuntimeOriginOf<T> = origin;
@@ -498,9 +556,9 @@ pub mod pallet {
 				Err(err) => &mut err.post_info,
 			};
 			post_info.set_extension_weight(info);
-			<T as Config>::InnerExtension::post_dispatch(pre, info, post_info, 0, &pd_res)
+			<T as Config>::InnerExtension::post_dispatch(pre, info, post_info, len, &pd_res)
 				.map_err(RunError::AfterDispatch)?;
-			Ok((post_info.calc_actual_weight(info), post_info.pays_fee(info), pd_res))
+			Ok((post_info.calc_actual_weight(info), pd_res))
 		}
 	}
 }
