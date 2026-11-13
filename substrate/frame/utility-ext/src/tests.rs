@@ -24,7 +24,7 @@ use super::*;
 use crate as pallet_utility_ext;
 use frame_support::{
 	derive_impl, parameter_types,
-	traits::{ConstU32, ConstU8, Everything},
+	traits::{ConstU32, ConstU8, Everything, Get},
 	weights::{IdentityFee, Weight},
 };
 use frame_system::EnsureRoot;
@@ -45,6 +45,8 @@ pub mod example {
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		type CouncilOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+		/// What the fee payment extension's transient credit holds.
+		type FeeCredit: Get<u64>;
 	}
 
 	#[pallet::call]
@@ -104,12 +106,25 @@ pub mod example {
 			CouncilCalls::<T>::mutate(|n| *n += 1);
 			Ok(())
 		}
+
+		/// Records the withdrawn fee it can see.
+		#[pallet::call_index(5)]
+		#[pallet::weight(0)]
+		pub fn observe_fee_credit(origin: OriginFor<T>) -> DispatchResult {
+			ensure_signed(origin)?;
+			ObservedFeeCredit::<T>::put(T::FeeCredit::get());
+			Ok(())
+		}
 	}
 
 	#[pallet::error]
 	pub enum Error<T> {
 		Custom,
 	}
+
+	/// What the last `observe_fee_credit` saw.
+	#[pallet::storage]
+	pub type ObservedFeeCredit<T: Config> = StorageValue<_, u64, ValueQuery>;
 
 	/// How many times `foobar` was dispatched successfully.
 	#[pallet::storage]
@@ -180,7 +195,8 @@ parameter_types! {
 	pub const MotionDuration: BlockNumber = 3;
 	pub const MaxProposals: u32 = 100;
 	pub const MaxMembers: u32 = 100;
-	pub MaxProposalWeight: Weight = sp_runtime::Perbill::from_percent(50) * BlockWeights::get().max_block;
+	pub MaxProposalWeight: Weight =
+		sp_runtime::Perbill::from_percent(50) * BlockWeights::get().max_block;
 }
 
 type CouncilCollective = pallet_collective::Instance1;
@@ -202,6 +218,14 @@ impl pallet_collective::Config<CouncilCollective> for Test {
 
 impl example::Config for Test {
 	type CouncilOrigin = EnsureProportionAtLeast<u64, Instance1, 3, 4>;
+	type FeeCredit = FeeCredit;
+}
+
+pub struct FeeCredit;
+impl Get<u64> for FeeCredit {
+	fn get() -> u64 {
+		TransactionPayment::remaining_txfee::<u64>()
+	}
 }
 
 impl pallet_utility::Config for Test {
@@ -526,6 +550,10 @@ mod multi_origin {
 		RuntimeCall::Example(ExampleCall::free { err })
 	}
 
+	fn call_observe() -> RuntimeCall {
+		RuntimeCall::Example(ExampleCall::observe_fee_credit {})
+	}
+
 	fn call_claim() -> RuntimeCall {
 		RuntimeCall::Example(ExampleCall::claim {})
 	}
@@ -625,17 +653,21 @@ mod multi_origin {
 		(post_info, len, fee_paid_by(who))
 	}
 
-	fn tx_ext(nonce: u32) -> TxExtension {
+	fn tx_ext(nonce: u32, tip: u64) -> TxExtension {
 		(
 			frame_system::CheckNonce::from(nonce),
 			frame_system::CheckWeight::new(),
-			MultiOriginBatch::from(ChargeTransactionPayment::from(0)),
+			MultiOriginBatch::from(ChargeTransactionPayment::from(tip)),
 		)
 	}
 
 	/// A transaction of `call` signed by `who` with their current nonce.
 	fn signed_tx(who: u64, call: RuntimeCall) -> UncheckedExtrinsic {
-		let ext = tx_ext(System::account_nonce(who));
+		tipped_tx(who, call, 0)
+	}
+
+	fn tipped_tx(who: u64, call: RuntimeCall, tip: u64) -> UncheckedExtrinsic {
+		let ext = tx_ext(System::account_nonce(who), tip);
 		let payload = SignedPayload::new(call.clone(), ext.clone())
 			.expect("implicit data is available")
 			.using_encoded(|payload| payload.to_vec());
@@ -679,8 +711,7 @@ mod multi_origin {
 		weight.ref_time() + len as u64
 	}
 
-	/// The fee the submitter of `uxt` is charged before refunds: for its declared weight,
-	/// pipeline included, and its length.
+	/// The fee for the declared weight and length of `uxt`.
 	fn full_fee(uxt: &UncheckedExtrinsic) -> u64 {
 		fee(uxt.get_dispatch_info().total_weight(), uxt.encoded_size())
 	}
@@ -740,14 +771,22 @@ mod multi_origin {
 		indices.iter().map(|index| items[*index].encoded_size()).sum()
 	}
 
-	/// What the submitter of the batch `uxt` pays when every item pays for itself: the overhead,
-	/// the outer pipeline and the bytes which are not the items'.
+	/// What the submitter of the batch `uxt` pays when every item is refunded.
 	fn submitter_fee(uxt: &UncheckedExtrinsic) -> u64 {
 		let all = (0..items_of(&uxt.function).len()).collect::<Vec<_>>();
-		fee(overhead(uxt) + outer_weight(uxt), uxt.encoded_size() - items_len(uxt, &all))
+		submitter_fee_with(uxt, Weight::zero(), &all)
 	}
 
-	/// The outer pipeline's weight, which the pipeline adds to the batch's actual weight.
+	/// What the submitter of the batch `uxt` pays: the overhead, the outer pipeline, the
+	/// `unrefunded` weight and the bytes other than those of the `refunded` items.
+	fn submitter_fee_with(uxt: &UncheckedExtrinsic, unrefunded: Weight, refunded: &[usize]) -> u64 {
+		fee(
+			overhead(uxt) + outer_weight(uxt) + unrefunded,
+			uxt.encoded_size() - items_len(uxt, refunded),
+		)
+	}
+
+	/// The outer pipeline's weight.
 	fn outer_weight(uxt: &UncheckedExtrinsic) -> Weight {
 		uxt.get_dispatch_info().extension_weight
 	}
@@ -801,8 +840,6 @@ mod multi_origin {
 			apply_ok(uxt);
 
 			assert_eq!(balance(4), INITIAL_BALANCE + 300);
-			// The signed items pay for themselves, the council one pays nothing, the submitter
-			// pays for the rest.
 			assert!(fee_paid_by(1) > 0);
 			assert_eq!(balance(1), INITIAL_BALANCE - 100 - fee_paid_by(1));
 			assert_eq!(balance(2), INITIAL_BALANCE - 200 - fee_paid_by(2));
@@ -893,16 +930,13 @@ mod multi_origin {
 			let overhead = overhead(&uxt);
 			let (item_0, item_1) = (pipelines_weight(&uxt, &[0]), pipelines_weight(&uxt, &[1]));
 			let outer = outer_weight(&uxt);
-			// The declared weight is the batch overhead, the item pipelines and the calls.
 			assert_eq!(info.call_weight, overhead + item_0 + item_1 + w(3_000));
 
 			let post_info = apply_ok(uxt.clone());
 
-			// The unused call weight is refunded, the outer pipeline is paid for.
+			// The unused call weight is refunded.
 			let actual = overhead + item_0 + item_1 + w(1_500) + outer;
 			assert_eq!(post_info.actual_weight, Some(actual));
-			// Each item pays for its pipeline, its actual call weight and its bytes, the
-			// submitter for the overhead, the outer pipeline and the rest of the bytes.
 			assert_eq!(fee_paid_by(1), fee(item_0 + w(1_000), items_len(&uxt, &[0])));
 			assert_eq!(fee_paid_by(2), fee(item_1 + w(500), items_len(&uxt, &[1])));
 			assert_eq!(balance(1), INITIAL_BALANCE - fee_paid_by(1));
@@ -947,22 +981,15 @@ mod multi_origin {
 				spec(call_transfer(4, 100), SetOrigin::signed(1)),
 			];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			// The weight of the item which did not run is refunded, the invalid item's pipeline
-			// and the bytes of both are paid for by the submitter.
+			// The invalid item's pipeline and the bytes of both are paid for by the submitter.
 			let expected = overhead(&uxt) +
 				pipelines_weight(&uxt, &[0, 1]) +
 				specs[0].call.get_dispatch_info().call_weight +
 				outer_weight(&uxt);
-			let submitter = fee(
-				expected -
-					pipelines_weight(&uxt, &[0]) -
-					specs[0].call.get_dispatch_info().call_weight,
-				uxt.encoded_size() - items_len(&uxt, &[0]),
-			);
+			let submitter = submitter_fee_with(&uxt, pipelines_weight(&uxt, &[1]), &[0]);
 
 			let post_info = apply_ok(uxt);
 
-			// Only the first item applied.
 			assert_eq!(balance(4), INITIAL_BALANCE + 100);
 			assert_eq!(balance(1), INITIAL_BALANCE - 100 - fee_paid_by(1));
 			assert_eq!(System::account_nonce(1), 1);
@@ -1004,10 +1031,7 @@ mod multi_origin {
 				w(300) + outer_weight(&uxt);
 			let item_1 = pipelines_weight(&uxt, &[1]);
 			// The item the batch stopped before is on the submitter.
-			let submitter = fee(
-				overhead(&uxt) + outer_weight(&uxt),
-				uxt.encoded_size() - items_len(&uxt, &[0, 1]),
-			);
+			let submitter = submitter_fee_with(&uxt, Weight::zero(), &[0, 1]);
 			let item_1_len = items_len(&uxt, &[1]);
 
 			let post_info = apply_ok(uxt);
@@ -1053,10 +1077,7 @@ mod multi_origin {
 				w(1_000) + specs[3].call.get_dispatch_info().call_weight +
 				outer_weight(&uxt);
 			// The invalid item's pipeline and bytes are on the submitter.
-			let submitter = fee(
-				overhead(&uxt) + pipelines_weight(&uxt, &[1]) + outer_weight(&uxt),
-				uxt.encoded_size() - items_len(&uxt, &[0, 2, 3]),
-			);
+			let submitter = submitter_fee_with(&uxt, pipelines_weight(&uxt, &[1]), &[0, 2, 3]);
 
 			let post_info = apply_ok(uxt);
 
@@ -1081,7 +1102,7 @@ mod multi_origin {
 			assert_eq!(post_info.actual_weight, Some(expected));
 			assert_fee_credit_empty();
 
-			// Without failures it completes like the other variant.
+			// Without failures.
 			let specs = [spec(call_transfer(4, 100), SetOrigin::signed(1))];
 			apply_ok(batch_tx(3, BatchMode::All, &specs));
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
@@ -1330,7 +1351,7 @@ mod multi_origin {
 				),
 			);
 			// A general transaction has no signer and nothing in the pipeline authorizes it.
-			let uxt = UncheckedExtrinsic::new_transaction(call.clone(), tx_ext(0));
+			let uxt = UncheckedExtrinsic::new_transaction(call.clone(), tx_ext(0, 0));
 			assert_eq!(apply(uxt), Err(InvalidTransaction::UnknownOrigin.into()));
 			// A bare one skips the pipeline; the call fails before any item, charging the
 			// overhead only.
@@ -1428,7 +1449,7 @@ mod multi_origin {
 				spec(call_transfer(4, 100), SetOrigin::signed(2)),
 			];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			// The call ran before the rollback: the submitter pays for its declared weight.
+			// The call ran before the rollback.
 			let expected = overhead(&uxt) +
 				pipelines_weight(&uxt, &[0]) +
 				specs[0].call.get_dispatch_info().call_weight +
@@ -1622,13 +1643,11 @@ mod multi_origin {
 				spec(call_foobar(false, 1_000, None), SetOrigin::signed(1)),
 			];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let len = uxt.encoded_size();
 			let expected =
 				overhead(&uxt) + pipelines_weight(&uxt, &[0, 1]) + w(10) + outer_weight(&uxt);
 			// The free item is refunded, the invalid item's pipeline and the bytes of the other
 			// two are not.
-			let submitter =
-				fee(expected - pipelines_weight(&uxt, &[0]) - w(10), len - items_len(&uxt, &[0]));
+			let submitter = submitter_fee_with(&uxt, pipelines_weight(&uxt, &[1]), &[0]);
 
 			let post_info = apply_ok(uxt);
 
@@ -1723,9 +1742,8 @@ mod multi_origin {
 
 			let post_info = apply(uxt).unwrap().unwrap();
 
-			// The nonce check passes: the outer `CheckNonce` bumped 3's nonce. The item paid for
-			// itself without touching the submitter's fee, which is not refunded: the
-			// transaction's call is not a batch.
+			// The outer `CheckNonce` bumped 3's nonce. The transaction's call is not a batch:
+			// nothing is refunded.
 			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
 			assert_eq!(System::account_nonce(1), 1);
 			assert!(fee_paid_by(1) > 0);
@@ -1756,10 +1774,7 @@ mod multi_origin {
 			// An invalid item: nothing of this batch is refunded.
 			let specs = [with_nonce(spec(call_transfer(4, 100), SetOrigin::signed(2)), 5)];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let submitter = fee(
-				overhead(&uxt) + pipelines_weight(&uxt, &[0]) + outer_weight(&uxt),
-				uxt.encoded_size(),
-			);
+			let submitter = submitter_fee_with(&uxt, pipelines_weight(&uxt, &[0]), &[]);
 			apply_ok(uxt);
 			assert_eq!(fee_paid_by(3), submitter);
 			assert_fee_credit_empty();
@@ -1809,12 +1824,8 @@ mod multi_origin {
 		new_test_ext().execute_with(|| {
 			let specs = [authorized(call_claim()), authorized(call_claim())];
 			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			// The applied item is refunded though its origin paid nothing, like a general
-			// transaction; the rejected one is on the submitter.
-			let submitter = fee(
-				overhead(&uxt) + pipelines_weight(&uxt, &[1]) + outer_weight(&uxt),
-				uxt.encoded_size() - items_len(&uxt, &[0]),
-			);
+			// The applied item is refunded though its origin paid nothing.
+			let submitter = submitter_fee_with(&uxt, pipelines_weight(&uxt, &[1]), &[0]);
 			apply_ok(uxt);
 
 			// The first claim applied, the second was authorized against the state it left.
@@ -1839,10 +1850,7 @@ mod multi_origin {
 				spec(call_foobar(false, 1_000, None), SetOrigin::signed(2)),
 			];
 			let uxt = batch_tx(3, BatchMode::All, &specs);
-			let submitter = fee(
-				overhead(&uxt) + pipelines_weight(&uxt, &[0]) + outer_weight(&uxt),
-				uxt.encoded_size() - items_len(&uxt, &[1]),
-			);
+			let submitter = submitter_fee_with(&uxt, pipelines_weight(&uxt, &[0]), &[1]);
 			apply_ok(uxt);
 			assert_eq!(
 				pallet_events(),
@@ -1855,6 +1863,58 @@ mod multi_origin {
 			assert_eq!(balance(1), 1);
 			assert_eq!(System::account_nonce(1), 0);
 			assert_eq!(fee_paid_by(3), submitter);
+			assert_fee_credit_empty();
+		});
+	}
+
+	#[test]
+	fn items_see_their_own_fee_not_the_submitters() {
+		new_test_ext().execute_with(|| {
+			// A transaction's call sees the transaction's withdrawn fee.
+			let uxt = signed_tx(1, call_observe());
+			let transaction_fee = full_fee(&uxt);
+			assert_ok!(apply(uxt).unwrap());
+			assert_eq!(example::ObservedFeeCredit::<Test>::get(), transaction_fee);
+
+			// An item sees its own, whether the batch is the transaction's call or nested.
+			let specs = [spec(call_observe(), SetOrigin::signed(1))];
+			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
+			let item_fee = fee(pipelines_weight(&uxt, &[0]), items_len(&uxt, &[0]));
+			assert!(item_fee < full_fee(&uxt));
+			apply_ok(uxt);
+			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
+			assert_eq!(example::ObservedFeeCredit::<Test>::get(), item_fee);
+
+			let specs = [spec(call_observe(), SetOrigin::signed(1))];
+			let (mode, nonce) = (BatchMode::StopAtFailure, System::account_nonce(3));
+			let items = build_items(3, nonce, mode, &specs);
+			let item_fee = fee(items[0].extension.weight(&items[0].call), items[0].encoded_size());
+			let inner = batch_call(mode, nonce, items);
+			let uxt =
+				signed_tx(3, RuntimeCall::Utility(UtilityCall::batch_all { calls: vec![inner] }));
+			assert_ok!(apply(uxt).unwrap());
+			assert_eq!(pallet_events().last(), Some(&Event::BatchCompleted));
+			assert_eq!(example::ObservedFeeCredit::<Test>::get(), item_fee);
+			assert_eq!(TransactionPayment::remaining_txfee::<u64>(), 0);
+		});
+	}
+
+	#[test]
+	fn tip_stays_with_the_submitter() {
+		new_test_ext().execute_with(|| {
+			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(1))];
+			let (mode, nonce) = (BatchMode::StopAtFailure, System::account_nonce(3));
+			let call = batch_call(mode, nonce, build_items(3, nonce, mode, &specs));
+			let uxt = tipped_tx(3, call, 50);
+			let submitter = submitter_fee(&uxt) + 50;
+			let item = pipelines_weight(&uxt, &[0]) + w(1_000);
+			let item_len = items_len(&uxt, &[0]);
+
+			apply_ok(uxt);
+
+			assert_eq!(fee_paid_by(3), submitter);
+			assert_eq!(balance(3), INITIAL_BALANCE - submitter);
+			assert_eq!(fee_paid_by(1), fee(item, item_len));
 			assert_fee_credit_empty();
 		});
 	}

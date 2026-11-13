@@ -17,11 +17,10 @@
 
 //! Benchmarks for the Utility Extension Pallet.
 //!
-//! The items are built by [`Config::BenchmarkHelper`] with the real inner pipeline and a real
-//! call, which the batch also charges through the items' declared weights, so the overhead is
-//! overestimated by roughly one cheap signed transaction per item. This is deliberate: it errs in
-//! the safe direction and a weightless pipeline would not exercise the code the batch runs. The
-//! bytes component covers encoding and hashing the items.
+//! The items, built by [`Config::BenchmarkHelper`], run the real inner pipeline and a real call,
+//! which their declared weights already cover, so the overhead is overestimated by roughly one
+//! cheap signed transaction per item, on the safe side. The bytes component covers encoding and
+//! hashing the items.
 
 #![cfg(feature = "runtime-benchmarks")]
 
@@ -30,10 +29,6 @@ use frame_benchmarking::v2::*;
 use frame_support::{dispatch::DispatchClass, traits::Get};
 
 use crate::*;
-
-fn assert_last_event<T: Config>(generic_event: <T as frame_system::Config>::RuntimeEvent) {
-	frame_system::Pallet::<T>::assert_last_event(generic_event.into());
-}
 
 /// The submitter of a batch, the whitelisted caller with their nonce bumped as by `CheckNonce`,
 /// the nonce it was sent with and its `c` `remark` items, the first of which carries `b` bytes.
@@ -83,7 +78,7 @@ mod benchmark {
 		#[extrinsic_call]
 		_(frame_system::RawOrigin::Signed(submitter), items, nonce);
 
-		assert_last_event::<T>(Event::BatchCompleted.into());
+		frame_system::Pallet::<T>::assert_last_event(Event::BatchCompleted.into());
 	}
 
 	impl_benchmark_test_suite! {

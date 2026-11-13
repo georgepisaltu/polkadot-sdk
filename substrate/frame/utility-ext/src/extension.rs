@@ -50,14 +50,9 @@ impl<T, S: StaticTypeInfo> TypeInfo for MultiOriginBatch<T, S> {
 	}
 }
 
-impl<T, S: Encode> core::fmt::Debug for MultiOriginBatch<T, S> {
-	#[cfg(feature = "std")]
+impl<T, S: core::fmt::Debug> core::fmt::Debug for MultiOriginBatch<T, S> {
 	fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-		write!(f, "MultiOriginBatch<{:?}>", self.0.encode())
-	}
-	#[cfg(not(feature = "std"))]
-	fn fmt(&self, _: &mut core::fmt::Formatter) -> core::fmt::Result {
-		Ok(())
+		self.0.fmt(f)
 	}
 }
 

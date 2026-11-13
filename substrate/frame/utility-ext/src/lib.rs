@@ -35,35 +35,34 @@
 //! An invalid item (rejected by its pipeline) is not applied at all, like an invalid transaction.
 //! An item whose call fails keeps its pipeline's effects (nonce) while the call's effects are
 //! reverted, like a failed transaction. An item whose pipeline fails in `post_dispatch` is rolled
-//! back after its call ran and the submitter pays for its declared weight. Batches are not atomic:
-//! `batch_multi_origin` stops at the first item which is invalid or fails and keeps the items
-//! before it, `force_batch_multi_origin` applies every item regardless. The outcome is reported
-//! in events.
+//! back after its call ran. Batches are not atomic: `batch_multi_origin` stops at the first item
+//! which is invalid or fails and keeps the items before it, `force_batch_multi_origin` applies
+//! every item regardless. The outcome is reported in events.
 //!
 //! The submitter pays for the whole batch up front like for any transaction: the overhead, the
 //! items' pipelines and calls and the transaction's length, through the runtime's fee payment
 //! extension. Each item then pays for itself through its pipeline like a transaction of its own,
 //! for its weight and its bytes: a signed item is charged by its fee payment extension, an item
-//! with another origin is charged, or not, however the runtime charges such transactions. The
-//! pallet's [`MultiOriginBatch`] extension wraps the fee payment extension so that it refunds the
-//! submitter the weight and bytes of every item whose pipeline ran to completion, whether its
-//! call succeeded or failed. The submitter keeps paying for the items their pipeline rejected,
-//! before or after their call ran, and for the items the batch stopped before. While the items
-//! run, the submitter's withdrawn fee is set aside ([`Config::FeeCredit`]) so that the items' fee
-//! payment extensions settle with their own.
+//! with another origin is charged as the runtime charges such transactions. The pallet's
+//! [`MultiOriginBatch`] extension wraps the fee payment extension so that it refunds the submitter
+//! the weight and bytes of every item whose pipeline ran to completion, whether its call succeeded
+//! or failed. The submitter keeps paying for the other items' bytes and for the weight they used:
+//! the pipeline of an item rejected before its call ran, the pipeline and declared call weight of
+//! one rejected after. While the items run, the submitter's withdrawn fee is set aside
+//! ([`Config::FeeCredit`]) so that the items' fee payment extensions settle with their own.
 //!
 //! Items are signed over the [`ItemImplication`] of their batch, which binds them to the
 //! submitter, the submitter's nonce, the batch mode, their position and the other items, so an
-//! item cannot be applied elsewhere. The call checks that `nonce + 1` is the submitter's current
-//! nonce, i.e. that `nonce` is the one `CheckNonce` just bumped, so the runtime's pipeline must
-//! contain `CheckNonce`. Like any transaction pipeline, the item pipeline must bring its own
+//! item cannot be applied in another batch. The call checks that `nonce + 1` is the submitter's
+//! current nonce, i.e. that `nonce` is the one `CheckNonce` just bumped, so the runtime's pipeline
+//! must contain `CheckNonce`. Like any transaction pipeline, the item pipeline must bring its own
 //! replay protection, e.g. `CheckNonce`.
 //!
 //! Items are not validated when the batch enters the transaction pool, only the submitter's
-//! transaction is. A batch with invalid items is therefore included and the submitter pays for
-//! it, the invalid items' pipelines and bytes included, while an item signer can invalidate their
-//! item at no cost by using their nonce before the batch is included. Submitters should only
-//! batch items of parties they trust to that extent.
+//! transaction is. A batch with invalid items is therefore included and paid for by the
+//! submitter, while an item signer can invalidate their item at no cost by using their nonce
+//! before the batch is included. Submitters should only batch items of parties they trust to
+//! that extent.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -135,19 +134,11 @@ pub enum ItemError {
 	Failed(DispatchError),
 }
 
-/// The weight and bytes of the items of a batch which paid for themselves.
+/// The weight and bytes of the items of a batch whose pipeline ran to completion.
 #[derive(Encode, Decode, Clone, Copy, PartialEq, Eq, Debug, Default, TypeInfo, MaxEncodedLen)]
 pub struct Share {
 	pub weight: Weight,
 	pub len: u32,
-}
-
-/// Why an item could not be applied.
-enum RunError {
-	/// It was rejected before dispatch.
-	BeforeDispatch(TransactionValidityError),
-	/// Its pipeline failed in `post_dispatch`, after the call ran.
-	AfterDispatch(TransactionValidityError),
 }
 
 /// An item of a multi-origin batch: a general transaction without preamble, validated with the
@@ -214,9 +205,7 @@ impl<'a, AccountId: Encode, Nonce: Encode, Hash: Encode> Encode
 	}
 }
 
-/// The transient credit in which the fee payment extension keeps the transaction's withdrawn fee,
-/// set aside while the items of a batch run so that their fee payment extensions settle with their
-/// own.
+/// The transient credit in which the fee payment extension keeps the transaction's withdrawn fee.
 pub trait FeeCredit {
 	type Credit;
 	/// Take the credit of the transaction, if any.
@@ -234,10 +223,9 @@ impl FeeCredit for () {
 	fn restore(_: ()) {}
 }
 
-type TxCreditOf<T> =
-	<<<T as pallet_transaction_payment::Config>::OnChargeTransaction as TxCreditHold<T>>::Credit as SuppressedDrop>::Inner;
-type TxBalanceOf<T> =
-	<<T as pallet_transaction_payment::Config>::OnChargeTransaction as OnChargeTransaction<T>>::Balance;
+type OnChargeOf<T> = <T as pallet_transaction_payment::Config>::OnChargeTransaction;
+type TxCreditOf<T> = <<OnChargeOf<T> as TxCreditHold<T>>::Credit as SuppressedDrop>::Inner;
+type TxBalanceOf<T> = <OnChargeOf<T> as OnChargeTransaction<T>>::Balance;
 
 impl<T: pallet_transaction_payment::Config> FeeCredit for pallet_transaction_payment::Pallet<T>
 where
@@ -292,12 +280,10 @@ pub mod pallet {
 		/// The transaction extension pipeline carried by every item of a multi-origin batch.
 		///
 		/// The runtime's pipeline without the extensions acting on the transaction as a whole
-		/// (`CheckWeight`, `WeightReclaim`), the fee payment extension included: it charges the
-		/// item's origin for the item's weight and bytes. As the [`ItemImplication`] binds items to
-		/// their batch but not to the chain, it is recommended to include `CheckGenesis`,
-		/// `CheckSpecVersion`, `CheckTxVersion` and `CheckEra`. The extension verifying signatures
-		/// should come first, so that the data of every other extension is in the implication it
-		/// signs.
+		/// (`CheckWeight`, `WeightReclaim`), the fee payment extension included. As the
+		/// [`ItemImplication`] binds items to their batch but not to the chain, it is recommended
+		/// to include `CheckGenesis`, `CheckSpecVersion`, `CheckTxVersion` and `CheckEra`. The
+		/// extension verifying signatures should come first, see [`ItemImplication`].
 		///
 		/// Items are validated with [`TransactionSource::External`] and their encoded length. The
 		/// validity their pipeline returns is dropped: `provides` tags do not deduplicate items,
@@ -307,8 +293,8 @@ pub mod pallet {
 		/// [`ItemImplication`] encoding, is what wallets need to build items.
 		type InnerExtension: TransactionExtension<RuntimeCallOf<Self>> + TypeInfo;
 
-		/// Sets the transaction's fee aside while the items run, see [`FeeCredit`]:
-		/// `pallet_transaction_payment::Pallet` for its fee payment extensions.
+		/// The [`FeeCredit`] of the fee payment extension, e.g.
+		/// `pallet_transaction_payment::Pallet`.
 		type FeeCredit: FeeCredit;
 
 		/// Builds the items the benchmarks dispatch.
@@ -427,9 +413,9 @@ pub mod pallet {
 		) -> DispatchResultWithPostInfo {
 			let overhead = Self::overhead_weight(items.len() as u32, items.encoded_size() as u32);
 			let submitter = ensure_signed(origin).map_err(|e| e.with_weight(overhead))?;
-			// `CheckNonce` bumped the nonce of the transaction in `prepare`.
-			let bumped = nonce.checked_add(&One::one());
-			if bumped != Some(frame_system::Pallet::<T>::account_nonce(&submitter)) {
+			if nonce.checked_add(&One::one()) !=
+				Some(frame_system::Pallet::<T>::account_nonce(&submitter))
+			{
 				return Err(Error::<T>::BadNonce.with_weight(overhead));
 			}
 			let items_hash = Self::items_hash(items.iter().map(|item| (&item.call, &item.origin)));
@@ -497,33 +483,26 @@ pub mod pallet {
 					Ok(res) => TransactionOutcome::Commit(Ok(res)),
 				}
 			})
-			.unwrap_or_else(|()| {
-				Err(RunError::BeforeDispatch(InvalidTransaction::ExhaustsResources.into()))
-			});
+			.unwrap_or(Err((info.extension_weight, InvalidTransaction::ExhaustsResources.into())));
 
 			match result {
-				Err(RunError::BeforeDispatch(err)) => {
-					(info.extension_weight, Err(ItemError::Invalid(err)))
-				},
-				// The call ran before the rollback: its declared weight is used and paid for.
-				Err(RunError::AfterDispatch(err)) => {
-					(info.total_weight(), Err(ItemError::Invalid(err)))
-				},
 				Ok((weight, result)) => (weight, result.map_err(ItemError::Failed)),
+				Err((weight, err)) => (weight, Err(ItemError::Invalid(err))),
 			}
 		}
 
 		/// Run an item through its pipeline and dispatch its call. Returns the actual weight of
-		/// the item and its result.
+		/// the item and its result, or the weight it used and why it is invalid.
 		fn run_item(
 			item: MultiOriginItemOf<T>,
 			len: usize,
 			implication: &ItemImplication<AccountIdOf<T>, NonceOf<T>, HashOf<T>>,
 			info: &DispatchInfo,
-		) -> Result<(Weight, Result<(), DispatchError>), RunError> {
+		) -> Result<(Weight, Result<(), DispatchError>), (Weight, TransactionValidityError)> {
 			let MultiOriginItem { call, extension, origin: expected } = item;
+			let before_dispatch = |err: TransactionValidityError| (info.extension_weight, err);
 			if !Self::item_call_allowed(&call) {
-				return Err(RunError::BeforeDispatch(InvalidTransaction::Call.into()));
+				return Err(before_dispatch(InvalidTransaction::Call.into()));
 			}
 			let implication = TxBaseImplication(implication);
 			let (_, val, origin) = extension
@@ -532,20 +511,18 @@ pub mod pallet {
 					&call,
 					info,
 					len,
-					extension.implicit().map_err(RunError::BeforeDispatch)?,
+					extension.implicit().map_err(before_dispatch)?,
 					&implication,
 					TransactionSource::External,
 				)
-				.map_err(RunError::BeforeDispatch)?;
+				.map_err(before_dispatch)?;
 			if !origin.is_transaction_authorized() {
-				return Err(RunError::BeforeDispatch(InvalidTransaction::UnknownOrigin.into()));
+				return Err(before_dispatch(InvalidTransaction::UnknownOrigin.into()));
 			}
 			if origin.caller() != &expected {
-				return Err(RunError::BeforeDispatch(InvalidTransaction::BadSigner.into()));
+				return Err(before_dispatch(InvalidTransaction::BadSigner.into()));
 			}
-			let pre = extension
-				.prepare(val, &origin, &call, info, len)
-				.map_err(RunError::BeforeDispatch)?;
+			let pre = extension.prepare(val, &origin, &call, info, len).map_err(before_dispatch)?;
 
 			let mut origin: RuntimeOriginOf<T> = origin;
 			origin.add_filter(Self::item_call_allowed);
@@ -557,7 +534,7 @@ pub mod pallet {
 			};
 			post_info.set_extension_weight(info);
 			<T as Config>::InnerExtension::post_dispatch(pre, info, post_info, len, &pd_res)
-				.map_err(RunError::AfterDispatch)?;
+				.map_err(|err| (info.total_weight(), err))?;
 			Ok((post_info.calc_actual_weight(info), pd_res))
 		}
 	}

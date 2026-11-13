@@ -473,8 +473,7 @@ mod multi_origin_items {
 		)
 	}
 
-	/// What `VerifySignature` hashes and verifies: `implication`, then the explicit and the
-	/// implicit data of `rest`.
+	/// The payload `VerifySignature` verifies for `rest`, see `ItemImplication`.
 	pub fn signing_payload(implication: Vec<u8>, rest: &Rest) -> Vec<u8> {
 		let implicit = rest.implicit().expect("implicit data is available; qed");
 		let mut payload = implication;
@@ -4850,8 +4849,7 @@ mod tests {
 				];
 				let batch = stop_batch(&dave_account, &specs);
 				let items = vec![item(&alice, &batch, 0), item(&bob, &batch, 1)];
-				// Both items pay for themselves: at least their call weights and their bytes are
-				// refunded.
+				// At least the items' call weights and bytes are refunded.
 				let refund =
 					fee_of(calls_weight(items.iter().map(|item| &item.call))) + items_fee(&items);
 				let uxt = batch_tx(&dave, &batch, items);
@@ -4860,7 +4858,6 @@ mod tests {
 				assert_eq!(apply(uxt), Ok(Ok(())));
 
 				assert_eq!(Balances::free_balance(&charlie_account), 20 * DOLLARS);
-				// Each signer paid their transfer and their item, the submitter paid the rest.
 				let (alice_fee, bob_fee) = (fee_paid_by(&alice_account), fee_paid_by(&bob_account));
 				assert!(alice_fee > 0 && bob_fee > 0);
 				assert_eq!(Balances::free_balance(&alice_account), 90 * DOLLARS - alice_fee);
@@ -5030,8 +5027,7 @@ mod tests {
 					]
 				};
 
-				// A failed authorization stops the batch, keeping what ran before it. The
-				// invalid item is not free for the submitter.
+				// A failed authorization stops the batch, keeping what ran before it.
 				let bad = specs(vec![9]);
 				let batch = stop_batch(&dave_account, &bad);
 				let uxt = batch_tx(
@@ -5072,8 +5068,7 @@ mod tests {
 					item(&bob, &batch, 2),
 					item_with_nonce(&alice, 2, &batch, 3),
 				];
-				// Every item paid for itself, the authorized one with nothing: at least their call
-				// weights and their bytes are refunded to the submitter.
+				// Every item applied: at least their call weights and bytes are refunded.
 				let refund =
 					fee_of(calls_weight(items.iter().map(|item| &item.call))) + items_fee(&items);
 				let uxt = batch_tx(&dave, &batch, items);
@@ -5142,8 +5137,7 @@ mod tests {
 				let bob_fee = fee_paid_by(&bob_account);
 				assert!(bob_fee > 0);
 				assert_eq!(Balances::free_balance(&bob_account), 100 * DOLLARS - bob_fee);
-				// The invalid item's call never ran and the others paid for themselves: at least
-				// their call weights are refunded.
+				// At least every call weight is refunded.
 				let refund = fee_of(calls_weight(specs.iter().map(|(call, _)| call)));
 				let paid = fee_paid_by(&dave_account);
 				assert!(paid > 0 && paid <= full_fee - refund, "{paid} vs {full_fee}");
@@ -5187,7 +5181,7 @@ mod tests {
 					vec![(transfer(&charlie_account, 10 * DOLLARS), signed_by(&alice_account))];
 				let batch = stop_batch(&bob_account, &specs);
 				let items = vec![item(&alice, &batch, 0)];
-				// The item pays for itself: its declared weight and its bytes are refunded.
+				// Its declared weight and bytes are refunded.
 				let refund = fee_of(calls_weight(items.iter().map(|item| &item.call))) +
 					fee_of(items[0].extension.weight(&items[0].call)) +
 					items_fee(&items);
