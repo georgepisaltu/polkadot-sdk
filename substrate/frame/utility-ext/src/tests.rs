@@ -480,7 +480,7 @@ mod multi_origin {
 	use sp_runtime::{
 		generic::SignedPayload,
 		testing::TestSignature,
-		traits::{Applyable, BadOrigin, Checkable, IdentityLookup},
+		traits::{Applyable, BadOrigin, Checkable, DispatchTransaction, IdentityLookup},
 		transaction_validity::{InvalidTransaction, TransactionValidityError, ValidTransaction},
 		ApplyExtrinsicResultWithInfo, DispatchError,
 	};
@@ -1675,14 +1675,7 @@ mod multi_origin {
 			assert_ok!(apply(uxt).unwrap());
 			assert_eq!(fee_paid_by(1), transfer_fee);
 			assert!(RefundableShare::<Test>::get().is_some());
-			// A batch transaction clears it before running.
-			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
-			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let batch_fee = submitter_fee(&uxt);
-			apply_ok(uxt);
-			assert!(batch_fee > 0);
-			assert_eq!(fee_paid_by(3), batch_fee);
-			assert_fee_credit_empty();
+			assert_eq!(TransactionPayment::remaining_txfee::<u64>(), 0);
 		});
 	}
 
@@ -1705,21 +1698,33 @@ mod multi_origin {
 	}
 
 	#[test]
-	fn stale_refundable_share_is_cleared_even_when_the_batch_fails() {
+	fn batch_transaction_clears_the_stale_share_in_prepare() {
 		new_test_ext().execute_with(|| {
 			RefundableShare::<Test>::put(Share { weight: Weight::MAX, len: u32::MAX });
 			let specs = [spec(call_free(false), SetOrigin::signed(1))];
-			let items = build_items(3, 0, BatchMode::StopAtFailure, &specs);
-			// The wrong nonce: the call fails before writing the share.
-			let uxt = signed_tx(3, batch_call(BatchMode::StopAtFailure, 5, items));
-			let len = uxt.encoded_size();
-			let charged = overhead(&uxt) + outer_weight(&uxt);
+			let call = batch_call(
+				BatchMode::StopAtFailure,
+				0,
+				build_items(3, 0, BatchMode::StopAtFailure, &specs),
+			);
+			let ext: MultiOriginBatch<Test, ChargeTransactionPayment<Test>> =
+				ChargeTransactionPayment::from(0).into();
+			let info = call.get_dispatch_info();
+			let len = call.encoded_size();
 
-			let err = apply(uxt).unwrap().unwrap_err();
-
-			assert_eq!(err.error, Error::<Test>::BadNonce.into());
-			assert_eq!(fee_paid_by(3), fee(charged, len));
-			assert_fee_credit_empty();
+			let (_, val, origin) = ext
+				.validate_only(
+					RuntimeOrigin::signed(3),
+					&call,
+					&info,
+					len,
+					TransactionSource::External,
+					0,
+				)
+				.unwrap();
+			assert!(RefundableShare::<Test>::get().is_some());
+			ext.prepare(val, &origin, &call, &info, len).unwrap();
+			assert!(RefundableShare::<Test>::get().is_none());
 		});
 	}
 
@@ -1751,14 +1756,7 @@ mod multi_origin {
 			assert_eq!(fee_paid_by(3), fee(post_info.actual_weight.unwrap(), len));
 			assert_eq!(balance(3), INITIAL_BALANCE - fee_paid_by(3));
 			assert!(RefundableShare::<Test>::get().is_some());
-			// The next batch transaction clears it.
-			let specs = [spec(call_foobar(false, 1_000, None), SetOrigin::signed(2))];
-			let uxt = batch_tx(3, BatchMode::StopAtFailure, &specs);
-			let batch_fee = submitter_fee(&uxt);
-			apply_ok(uxt);
-			assert!(batch_fee > 0);
-			assert_eq!(fee_paid_by(3), batch_fee);
-			assert_fee_credit_empty();
+			assert_eq!(TransactionPayment::remaining_txfee::<u64>(), 0);
 		});
 	}
 

@@ -4501,18 +4501,16 @@ mod tests {
 			multi_origin_items::{extension as item_extension, rest_of_pipeline, signing_payload},
 			*,
 		};
-		use frame_support::dispatch::GetDispatchInfo;
+		use frame_support::dispatch::{GetDispatchInfo, Pays, PostDispatchInfo};
 		use pallet_utility_ext::{
 			BatchMode, Event as UtilityExtEvent, ItemError, ItemImplication, MultiOriginItem,
-			MultiOriginItemOf,
+			MultiOriginItemsOf,
 		};
 		use sp_core::{sr25519, Pair as _};
 		use sp_io::hashing::blake2_256;
 		use sp_runtime::{
 			traits::{Applyable, Checkable, TransactionExtension as _},
-			transaction_validity::{
-				InvalidTransaction, TransactionSource, TransactionValidityError,
-			},
+			transaction_validity::{InvalidTransaction, TransactionSource},
 			BuildStorage, MultiSignature,
 		};
 
@@ -4743,30 +4741,69 @@ mod tests {
 			xt.apply::<Runtime>(&info, len).map(|res| res.map(|_| ()).map_err(|e| e.error))
 		}
 
+		/// The items of the batch `uxt`.
+		fn items_of(uxt: &UncheckedExtrinsic) -> &MultiOriginItemsOf<Runtime> {
+			match &uxt.0.function {
+				RuntimeCall::UtilityExt(
+					pallet_utility_ext::Call::batch_multi_origin { items, .. } |
+					pallet_utility_ext::Call::force_batch_multi_origin { items, .. },
+				) => items,
+				_ => panic!("not a batch"),
+			}
+		}
+
 		/// What the submitter of `uxt` is charged before refunds, like for any transaction.
 		fn full_fee(uxt: &UncheckedExtrinsic) -> Balance {
 			let info = uxt.get_dispatch_info();
 			TransactionPayment::compute_fee(uxt.encoded_size() as u32, &info, 0)
 		}
 
-		/// The part of a fee for `weight`.
-		fn fee_of(weight: Weight) -> Balance {
-			TransactionPayment::weight_to_fee(weight)
-		}
-
-		/// The part of a fee for the bytes of `items`.
-		fn items_fee<'a>(
-			items: impl IntoIterator<Item = &'a MultiOriginItemOf<Runtime>>,
+		/// What the submitter of the batch `uxt` pays: the overhead, the outer pipeline, the
+		/// `unrefunded` weight and the bytes other than those of the `refunded` items.
+		fn submitter_fee(
+			uxt: &UncheckedExtrinsic,
+			unrefunded: Weight,
+			refunded: &[usize],
 		) -> Balance {
-			let len = items.into_iter().map(|item| item.encoded_size()).sum::<usize>();
-			TransactionPayment::length_to_fee(len as u32)
+			let items = items_of(uxt);
+			let overhead =
+				UtilityExt::overhead_weight(items.len() as u32, items.encoded_size() as u32);
+			let refunded_len =
+				refunded.iter().map(|index| items[*index].encoded_size()).sum::<usize>();
+			let info = uxt.get_dispatch_info();
+			let post_info = PostDispatchInfo {
+				actual_weight: Some(overhead + info.extension_weight + unrefunded),
+				pays_fee: Pays::Yes,
+			};
+			let len = (uxt.encoded_size() - refunded_len) as u32;
+			TransactionPayment::compute_actual_fee(len, &info, &post_info, 0)
 		}
 
-		/// The declared weight of `calls`.
-		fn calls_weight<'a>(calls: impl IntoIterator<Item = &'a RuntimeCall>) -> Weight {
-			calls.into_iter().fold(Weight::zero(), |weight, call| {
-				weight.saturating_add(call.get_dispatch_info().call_weight)
+		/// The weight of the pipelines of the items at `indices` of the batch `uxt`.
+		fn pipelines_weight(uxt: &UncheckedExtrinsic, indices: &[usize]) -> Weight {
+			let items = items_of(uxt);
+			indices.iter().fold(Weight::zero(), |weight, index| {
+				weight.saturating_add(items[*index].extension.weight(&items[*index].call))
 			})
+		}
+
+		/// What the item at `index` of the batch `uxt` pays, its call using its declared weight.
+		fn item_fee(uxt: &UncheckedExtrinsic, index: usize) -> Balance {
+			let item = &items_of(uxt)[index];
+			let mut info = item.call.get_dispatch_info();
+			info.extension_weight = item.extension.weight(&item.call);
+			TransactionPayment::compute_fee(item.encoded_size() as u32, &info, 0)
+		}
+
+		/// What `native` costs in `asset` at the pool's current price.
+		fn in_asset(asset: u32, native: Balance) -> Balance {
+			AssetConversion::quote_price_tokens_for_exact_tokens(
+				NativeOrWithId::WithId(asset),
+				NativeOrWithId::Native,
+				native,
+				true,
+			)
+			.expect("the pool is liquid; qed")
 		}
 
 		/// A sufficient asset with a native pool, both provided by `provider`, who is funded for
@@ -4849,22 +4886,19 @@ mod tests {
 				];
 				let batch = stop_batch(&dave_account, &specs);
 				let items = vec![item(&alice, &batch, 0), item(&bob, &batch, 1)];
-				// At least the items' call weights and bytes are refunded.
-				let refund =
-					fee_of(calls_weight(items.iter().map(|item| &item.call))) + items_fee(&items);
 				let uxt = batch_tx(&dave, &batch, items);
-				let full_fee = full_fee(&uxt);
+				let (alice_fee, bob_fee) = (item_fee(&uxt, 0), item_fee(&uxt, 1));
+				let submitter = submitter_fee(&uxt, Weight::zero(), &[0, 1]);
 
 				assert_eq!(apply(uxt), Ok(Ok(())));
 
 				assert_eq!(Balances::free_balance(&charlie_account), 20 * DOLLARS);
-				let (alice_fee, bob_fee) = (fee_paid_by(&alice_account), fee_paid_by(&bob_account));
-				assert!(alice_fee > 0 && bob_fee > 0);
+				assert_eq!(fee_paid_by(&alice_account), alice_fee);
+				assert_eq!(fee_paid_by(&bob_account), bob_fee);
 				assert_eq!(Balances::free_balance(&alice_account), 90 * DOLLARS - alice_fee);
 				assert_eq!(Balances::free_balance(&bob_account), 90 * DOLLARS - bob_fee);
-				let paid = fee_paid_by(&dave_account);
-				assert!(paid > 0 && paid <= full_fee - refund, "{paid} vs {full_fee}");
-				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - paid);
+				assert_eq!(fee_paid_by(&dave_account), submitter);
+				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - submitter);
 				assert_eq!(System::account_nonce(&alice_account), 1);
 				assert_eq!(System::account_nonce(&bob_account), 1);
 				assert_eq!(System::account_nonce(&dave_account), 1);
@@ -4896,6 +4930,8 @@ mod tests {
 				let batch = stop_batch(&dave_account, &specs);
 				let forged = misattributed_item(&alice, &bob_account, &batch, 0);
 				let uxt = batch_tx(&dave, &batch, vec![forged, item(&alice, &batch, 1)]);
+				// The submitter is charged the rejecting pipeline and every byte.
+				let submitter = submitter_fee(&uxt, pipelines_weight(&uxt, &[0]), &[]);
 
 				assert_eq!(apply(uxt), Ok(Ok(())));
 
@@ -4904,10 +4940,8 @@ mod tests {
 				assert_eq!(Balances::free_balance(&alice_account), 100 * DOLLARS);
 				assert_eq!(System::account_nonce(&bob_account), 0);
 				assert_eq!(System::account_nonce(&alice_account), 0);
-				// The submitter still pays for the pipeline which rejected the item.
-				let paid = fee_paid_by(&dave_account);
-				assert!(paid > 0);
-				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - paid);
+				assert_eq!(fee_paid_by(&dave_account), submitter);
+				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - submitter);
 				assert_eq!(
 					batch_events(),
 					vec![UtilityExtEvent::BatchInterrupted {
@@ -5008,8 +5042,8 @@ mod tests {
 						code_len: code.len() as u32,
 					},
 				);
-				// Alice pays Bob, the authorized registration applies, Bob pays Alice back part
-				// of it out of what he just received, Alice pays Bob again with her next nonce.
+				// Alice pays Bob, the authorized registration applies, Bob pays Alice back more
+				// than he holds before her transfer, Alice pays Bob again with her next nonce.
 				let specs = |validation_code| {
 					vec![
 						(transfer(&bob_account, 10 * DOLLARS), signed_by(&alice_account)),
@@ -5022,7 +5056,7 @@ mod tests {
 							),
 							authorized(),
 						),
-						(transfer(&alice_account, 5 * DOLLARS), signed_by(&bob_account)),
+						(transfer(&alice_account, 15 * DOLLARS), signed_by(&bob_account)),
 						(transfer(&bob_account, 10 * DOLLARS), signed_by(&alice_account)),
 					]
 				};
@@ -5040,25 +5074,27 @@ mod tests {
 						item_with_nonce(&alice, 1, &batch, 3),
 					],
 				);
+				let bad_fee = submitter_fee(&uxt, pipelines_weight(&uxt, &[1]), &[0]);
+				let alice_bad_fee = item_fee(&uxt, 0);
 				assert_eq!(apply(uxt), Ok(Ok(())));
-				let bad_fee = fee_paid_by(&dave_account);
+				assert_eq!(fee_paid_by(&dave_account), bad_fee);
 				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - bad_fee);
-				let alice_bad_fee = fee_paid_by(&alice_account);
-				assert!(alice_bad_fee > 0);
+				assert_eq!(fee_paid_by(&alice_account), alice_bad_fee);
 				assert_eq!(Balances::free_balance(&bob_account), 10 * DOLLARS);
 				assert_eq!(System::account_nonce(&alice_account), 1);
 				assert_eq!(System::account_nonce(&bob_account), 0);
-				assert!(matches!(
+				let code_len_mismatch = RegistrarRelay::err_to_code(
+					pallet_registrar_relay::Error::<Runtime>::CodeLenMismatch,
+				);
+				assert_eq!(
 					batch_events().last(),
-					Some(UtilityExtEvent::BatchInterrupted {
+					Some(&UtilityExtEvent::BatchInterrupted {
 						index: 1,
-						error: ItemError::Invalid(TransactionValidityError::Invalid(
-							InvalidTransaction::Custom(_)
-						))
+						error: invalid(InvalidTransaction::Custom(code_len_mismatch)),
 					})
-				));
+				);
 
-				// Bob pays Alice back out of her transfer: items run in order.
+				// Bob's item needs Alice's first: the items run in order.
 				System::reset_events();
 				let good = specs(code);
 				let batch = stop_batch(&dave_account, &good);
@@ -5068,26 +5104,23 @@ mod tests {
 					item(&bob, &batch, 2),
 					item_with_nonce(&alice, 2, &batch, 3),
 				];
-				// Every item applied: at least their call weights and bytes are refunded.
-				let refund =
-					fee_of(calls_weight(items.iter().map(|item| &item.call))) + items_fee(&items);
 				let uxt = batch_tx(&dave, &batch, items);
-				let full_fee = full_fee(&uxt);
+				let good_fee = submitter_fee(&uxt, Weight::zero(), &[0, 1, 2, 3]);
+				let alice_good_fee = item_fee(&uxt, 0) + item_fee(&uxt, 3);
+				let bob_fee = item_fee(&uxt, 2);
 				assert_eq!(apply(uxt), Ok(Ok(())));
 				assert_eq!(batch_events().last(), Some(&UtilityExtEvent::BatchCompleted));
-				let good_fee = fee_paid_by(&dave_account);
-				assert!(good_fee > 0 && good_fee <= full_fee - refund, "{good_fee} vs {full_fee}");
+				assert_eq!(fee_paid_by(&dave_account), good_fee);
 				assert_eq!(
 					Balances::free_balance(&dave_account),
 					100 * DOLLARS - bad_fee - good_fee
 				);
-				assert_eq!(
-					Balances::free_balance(&bob_account),
-					25 * DOLLARS - fee_paid_by(&bob_account)
-				);
+				assert_eq!(fee_paid_by(&bob_account), bob_fee);
+				assert_eq!(Balances::free_balance(&bob_account), 15 * DOLLARS - bob_fee);
+				assert_eq!(fee_paid_by(&alice_account), alice_good_fee);
 				assert_eq!(
 					Balances::free_balance(&alice_account),
-					75 * DOLLARS - alice_bad_fee - fee_paid_by(&alice_account)
+					85 * DOLLARS - alice_bad_fee - alice_good_fee
 				);
 				assert_eq!(System::account_nonce(&alice_account), 3);
 				assert_eq!(System::account_nonce(&bob_account), 1);
@@ -5125,23 +5158,20 @@ mod tests {
 						item_with_nonce(&alice, 1, &batch, 3),
 					],
 				);
-				let full_fee = full_fee(&uxt);
+				let alice_fee = item_fee(&uxt, 0) + item_fee(&uxt, 3);
+				let bob_fee = item_fee(&uxt, 2);
+				let submitter = submitter_fee(&uxt, pipelines_weight(&uxt, &[1]), &[0, 2, 3]);
 
 				assert_eq!(apply(uxt), Ok(Ok(())));
 
 				assert_eq!(Balances::free_balance(&charlie_account), 20 * DOLLARS);
-				let alice_fee = fee_paid_by(&alice_account);
-				assert!(alice_fee > 0);
+				assert_eq!(fee_paid_by(&alice_account), alice_fee);
 				assert_eq!(Balances::free_balance(&alice_account), 80 * DOLLARS - alice_fee);
 				// The invalid item cost Bob nothing, the failed one its fee.
-				let bob_fee = fee_paid_by(&bob_account);
-				assert!(bob_fee > 0);
+				assert_eq!(fee_paid_by(&bob_account), bob_fee);
 				assert_eq!(Balances::free_balance(&bob_account), 100 * DOLLARS - bob_fee);
-				// At least every call weight is refunded.
-				let refund = fee_of(calls_weight(specs.iter().map(|(call, _)| call)));
-				let paid = fee_paid_by(&dave_account);
-				assert!(paid > 0 && paid <= full_fee - refund, "{paid} vs {full_fee}");
-				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - paid);
+				assert_eq!(fee_paid_by(&dave_account), submitter);
+				assert_eq!(Balances::free_balance(&dave_account), 100 * DOLLARS - submitter);
 				assert_eq!(System::account_nonce(&alice_account), 2);
 				assert_eq!(System::account_nonce(&bob_account), 1);
 				let events = batch_events();
@@ -5181,30 +5211,39 @@ mod tests {
 					vec![(transfer(&charlie_account, 10 * DOLLARS), signed_by(&alice_account))];
 				let batch = stop_batch(&bob_account, &specs);
 				let items = vec![item(&alice, &batch, 0)];
-				// Its declared weight and bytes are refunded.
-				let refund = fee_of(calls_weight(items.iter().map(|item| &item.call))) +
-					fee_of(items[0].extension.weight(&items[0].call)) +
-					items_fee(&items);
 				let uxt = signed_tx_paying_in(
 					&bob,
 					batch.nonce,
 					Some(NativeOrWithId::WithId(asset)),
 					batch_call(batch.mode, batch.nonce, items),
 				);
-				let native = full_fee(&uxt) - refund;
+				let alice_fee = item_fee(&uxt, 0);
+				let full = full_fee(&uxt);
+				let native = submitter_fee(&uxt, Weight::zero(), &[0]);
+				// Bob buys the full fee with the asset and the refund is sold back at the price
+				// that purchase leaves.
+				let (native_reserve, asset_reserve) = AssetConversion::get_reserves(
+					NativeOrWithId::Native,
+					NativeOrWithId::WithId(asset),
+				)
+				.expect("the pool exists; qed");
+				let bought = in_asset(asset, full);
+				let sold = AssetConversion::get_amount_out(
+					LpFee::get(),
+					&(full - native),
+					&(native_reserve - full),
+					&(asset_reserve + bought),
+				)
+				.expect("the pool is liquid; qed");
 
 				assert_eq!(apply(uxt), Ok(Ok(())));
 
 				assert_eq!(batch_events().last(), Some(&UtilityExtEvent::BatchCompleted));
 				assert_eq!(Balances::free_balance(&charlie_account), 10 * DOLLARS);
-				assert_eq!(
-					Balances::free_balance(&alice_account),
-					90 * DOLLARS - fee_paid_by(&alice_account)
-				);
-				// Bob paid the rest in the asset, at the pool's price of about one to one, the
-				// refund swapped back once with the rest of the correction.
+				assert_eq!(fee_paid_by(&alice_account), alice_fee);
+				assert_eq!(Balances::free_balance(&alice_account), 90 * DOLLARS - alice_fee);
 				let paid = 1_000 * DOLLARS - Assets::balance(asset, &bob_account);
-				assert!(paid > native / 2 && paid < native * 2, "{paid} vs {native}");
+				assert_eq!(paid, bought - sold);
 				System::assert_has_event(
 					pallet_asset_conversion_tx_payment::Event::<Runtime>::AssetTxFeePaid {
 						who: bob_account.clone(),
@@ -5238,12 +5277,15 @@ mod tests {
 				let batch = stop_batch(&bob_account, &specs);
 				let items = vec![item_paying_in(&alice, NativeOrWithId::WithId(asset), &batch, 0)];
 				let uxt = batch_tx(&bob, &batch, items);
+				// The remark uses its declared weight: nothing is sold back.
+				let alice_fee = in_asset(asset, item_fee(&uxt, 0));
+				let bob_fee = submitter_fee(&uxt, Weight::zero(), &[0]);
 
 				assert_eq!(apply(uxt), Ok(Ok(())));
 
 				assert_eq!(batch_events().last(), Some(&UtilityExtEvent::BatchCompleted));
 				let paid = 1_000 * DOLLARS - Assets::balance(asset, &alice_account);
-				assert!(paid > 0);
+				assert_eq!(paid, alice_fee);
 				System::assert_has_event(
 					pallet_asset_conversion_tx_payment::Event::<Runtime>::AssetTxFeePaid {
 						who: alice_account.clone(),
@@ -5256,8 +5298,7 @@ mod tests {
 				assert_eq!(Balances::free_balance(&alice_account), 0);
 				assert_eq!(System::account_nonce(&alice_account), 1);
 				// Bob paid the rest natively, his fee untouched by Alice's settlement.
-				let bob_fee = fee_paid_by(&bob_account);
-				assert!(bob_fee > 0);
+				assert_eq!(fee_paid_by(&bob_account), bob_fee);
 				assert_eq!(Balances::free_balance(&bob_account), 100 * DOLLARS - bob_fee);
 				assert_eq!(TransactionPayment::remaining_txfee::<Balance>(), 0);
 			});

@@ -26,43 +26,47 @@
 //! submitter's nonce and a list of items. Each item is a general transaction on its own: a call
 //! plus an inner [`TransactionExtension`] pipeline ([`Config::InnerExtension`]) which authorizes
 //! the item's origin and does its transaction extension bookkeeping (nonce, mortality, etc.). The
-//! call applies the items in sequence: every item runs its pipeline's `validate` and `prepare`, is
-//! dispatched and runs its pipeline's `post_dispatch` before the next item starts, as if it were a
-//! transaction of its own included right after the previous item. Items cannot nest multi-origin
-//! batch calls and can only dispatch calls allowed by [`Config::MultiOriginCallFilter`]: such
-//! items are invalid, and nested calls are filtered at dispatch.
+//! call applies the items in sequence as every item runs its pipeline's `validate` and `prepare`,
+//! then it dispatches the call itself, then runs its pipeline's `post_dispatch` before the next
+//! item starts, as if it were a transaction of its own included right after the previous item (but
+//! items cannot be pulled out of a batch and ran as standalong transactions). Items cannot nest
+//! multi-origin batch calls and can only dispatch calls allowed by
+//! [`Config::MultiOriginCallFilter`].
 //!
-//! An invalid item (rejected by its pipeline) is not applied at all, like an invalid transaction.
-//! An item whose call fails keeps its pipeline's effects (nonce) while the call's effects are
-//! reverted, like a failed transaction. An item whose pipeline fails in `post_dispatch` is rolled
-//! back after its call ran. Batches are not atomic: `batch_multi_origin` stops at the first item
-//! which is invalid or fails and keeps the items before it, `force_batch_multi_origin` applies
-//! every item regardless. The outcome is reported in events.
+//! An item rejected by its pipeline is invalid and is not applied at all, like an invalid
+//! transaction. An item whose call fails keeps its pipeline's effects (nonce) while the call's
+//! effects are reverted, like a failed transaction. An item whose pipeline fails in `post_dispatch`
+//! is rolled back after its call ran. `batch_multi_origin` stops at the first item which is invalid
+//! or fails and keeps the items before it. `force_batch_multi_origin` tries to apply every item
+//! regardless of some failures. The outcome is reported in events.
 //!
-//! The submitter pays for the whole batch up front like for any transaction: the overhead, the
-//! items' pipelines and calls and the transaction's length, through the runtime's fee payment
-//! extension. Each item then pays for itself through its pipeline like a transaction of its own,
-//! for its weight and its bytes: a signed item is charged by its fee payment extension, an item
-//! with another origin is charged as the runtime charges such transactions. The pallet's
-//! [`MultiOriginBatch`] extension wraps the fee payment extension so that it refunds the submitter
-//! the weight and bytes of every item whose pipeline ran to completion, whether its call succeeded
-//! or failed. The submitter keeps paying for the other items' bytes and for the weight they used:
-//! the pipeline of an item rejected before its call ran, the pipeline and declared call weight of
-//! one rejected after. While the items run, the submitter's withdrawn fee is set aside
-//! ([`Config::FeeCredit`]) so that the items' fee payment extensions settle with their own.
+//! The submitter pays for the whole batch up front like for any transaction. The fee covers the
+//! overhead of processing the batch itself, the items' pipelines and calls and the transaction's
+//! length, through the runtime's fee payment extension. Each item then pays for itself through its
+//! inner pipeline like a standalone transaction. An individual signed item is charged by the chosen
+//! fee payment extension, an item with another origin is charged as the runtime charges such
+//! transactions (the extension that authorized the origin should also make sure it is rate limited
+//! to prevent spam). The pallet's [`MultiOriginBatch`] extension wraps the fee payment extension so
+//! that it refunds the submitter the weight and bytes of every item whose pipeline ran to
+//! completion, whether its call succeeded or failed. The submitter keeps paying for the other
+//! items' bytes and for the weight they used because if an item failed in the extension logic,
+//! either during validation, preparation or post dispatch, the effects are rolled back along with
+//! any fee payment or rate limited done, but the logic is still part of the block and consumes
+//! blockspace, so someone must pay for it (the submitter). While the items run, the submitter's
+//! withdrawn fee is set aside ([`Config::FeeCredit`]) so that the items' fee payment extensions
+//! settle with their own.
 //!
-//! Items are signed over the [`ItemImplication`] of their batch, which binds them to the
-//! submitter, the submitter's nonce, the batch mode, their position and the other items, so an
-//! item cannot be applied in another batch. The call checks that `nonce + 1` is the submitter's
-//! current nonce, i.e. that `nonce` is the one `CheckNonce` just bumped, so the runtime's pipeline
-//! must contain `CheckNonce`. Like any transaction pipeline, the item pipeline must bring its own
-//! replay protection, e.g. `CheckNonce`.
+//! Items are signed over the [`ItemImplication`] of their batch, which binds them to the submitter,
+//! the submitter's nonce, the batch mode, their position and the other items, so an item cannot be
+//! applied in another batch or taken out of the batch and ran as a standalone transaction. The call
+//! checks that `nonce + 1` is the submitter's current nonce, i.e. that `nonce` is the one
+//! `CheckNonce` just bumped, so the runtime's pipeline must contain `CheckNonce`. Like any
+//! transaction pipeline, the item pipeline must bring its own replay protection, e.g. `CheckNonce`.
 //!
 //! Items are not validated when the batch enters the transaction pool, only the submitter's
-//! transaction is. A batch with invalid items is therefore included and paid for by the
-//! submitter, while an item signer can invalidate their item at no cost by using their nonce
-//! before the batch is included. Submitters should only batch items of parties they trust to
-//! that extent.
+//! transaction is. A batch with invalid items is therefore included and paid for by the submitter,
+//! while an item signer can invalidate their item at no cost by using their nonce before the batch
+//! is included. Submitters should only batch items of parties they trust.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -168,17 +172,16 @@ pub type MultiOriginItemOf<T> =
 pub type MultiOriginItemsOf<T> =
 	BoundedVec<MultiOriginItemOf<T>, <T as Config>::MaxMultiOriginBatch>;
 
-/// Leads the encoding of [`ItemImplication`], so that it does not encode like the implication of
-/// a regular transaction, `(extension_version, call)`, for any realistic extension version and
-/// pallet index.
+/// Marker that leads the encoding of [`ItemImplication`], so that it does not encode like the
+/// implication of a regular transaction, `(extension_version, call)`, for any realistic extension
+/// version and pallet index.
 pub const ITEM_IMPLICATION_PREFIX: &[u8; 8] = b"_mbatch_";
 
 /// The base implication of an item, in place of the usual `(extension_version, call)`, binding
 /// it to its batch. Encodes as [`ITEM_IMPLICATION_PREFIX`] followed by its fields in order.
 ///
 /// The authorizing extension at the head of the item pipeline sees it in `validate` followed by
-/// the explicit, then the implicit data of the extensions after it: `VerifySignature` hashes and
-/// verifies that whole payload.
+/// the explicit and the implicit data of the extensions after it.
 pub struct ItemImplication<'a, AccountId, Nonce, Hash> {
 	/// The mode of the batch.
 	pub mode: BatchMode,
@@ -283,7 +286,7 @@ pub mod pallet {
 		/// (`CheckWeight`, `WeightReclaim`), the fee payment extension included. As the
 		/// [`ItemImplication`] binds items to their batch but not to the chain, it is recommended
 		/// to include `CheckGenesis`, `CheckSpecVersion`, `CheckTxVersion` and `CheckEra`. The
-		/// extension verifying signatures should come first, see [`ItemImplication`].
+		/// extensions verifying signatures should come first, see [`ItemImplication`].
 		///
 		/// Items are validated with [`TransactionSource::External`] and their encoded length. The
 		/// validity their pipeline returns is dropped: `provides` tags do not deduplicate items,
@@ -305,10 +308,11 @@ pub mod pallet {
 		#[pallet::constant]
 		type MaxMultiOriginBatch: Get<u32>;
 
-		/// The calls an item of a multi-origin batch may dispatch, directly or nested.
+		/// The calls an item of a multi-origin batch may dispatch.
 		///
-		/// Calls dispatched with a fresh origin, e.g. by `pallet_proxy::proxy` or
-		/// `pallet_sudo::sudo_as`, escape the filter put on the item's origin for nested calls.
+		/// Calls dispatched with a fresh origin generated within another call, like with
+		/// `pallet_proxy::proxy` or `pallet_sudo::sudo_as`, escape the filter put on the item's
+		/// origin for nested calls.
 		type MultiOriginCallFilter: Contains<RuntimeCallOf<Self>>;
 
 		/// Weight information for extrinsics in this pallet.
@@ -317,8 +321,8 @@ pub mod pallet {
 
 	/// The [`Share`] of the last batch, consumed by [`MultiOriginBatch`] in `post_dispatch` when
 	/// the batch is the transaction's call. A batch dispatched any other way leaves it behind
-	/// until the next batch transaction clears it in `prepare`. Whitelisted, so its operations
-	/// are not benchmarked.
+	/// until the next batch transaction clears it in `prepare`. This is transient storage and
+	/// doesn't make it into the proof size.
 	#[pallet::storage]
 	#[pallet::whitelist_storage]
 	pub type RefundableShare<T: Config> = StorageValue<_, Share, OptionQuery>;
